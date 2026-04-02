@@ -41,7 +41,7 @@ fn parse_and_save(
     let mut scorecard = parser::parse_scorecard(sc_path)?;
 
     // Enrich shot positions with club info + health data
-    parser::enrich_shots(&mut scorecard, clubs, &round.health_timeline);
+    parser::enrich_shots(&mut scorecard, clubs, &round.health_timeline, &round.tempo_timeline);
 
     round.scorecard = Some(scorecard);
     round.clubs     = clubs.to_vec();
@@ -134,7 +134,7 @@ async fn import_fit_files(
         }).cloned();
 
         if let Some(mut sc) = matched_sc {
-            parser::enrich_shots(&mut sc, &clubs, &round.health_timeline);
+            parser::enrich_shots(&mut sc, &clubs, &round.health_timeline, &round.tempo_timeline);
             round.scorecard = Some(sc);
         }
         round.clubs = clubs.clone();

@@ -814,6 +814,7 @@ function renderShotMap(round) {
             puttsLine,
             hr        ? `HR: ${hr}` : null,
             alt       ? `Alt: ${alt}` : null,
+            shot.swing_tempo != null ? `Tempo: ${shot.swing_tempo.toFixed(1)}:1` : null,
         ].filter(Boolean).join('<br>');
 
         const popup = L.popup({ closeButton: false, offset: [0, -4] }).setContent(popupLines);

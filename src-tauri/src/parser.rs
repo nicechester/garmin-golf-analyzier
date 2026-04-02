@@ -354,7 +354,7 @@ pub fn parse_scorecard(path: &Path) -> Result<Scorecard, String> {
 }
 
 /// Enrich scorecard shot positions with club info and health data from the activity.
-pub fn enrich_shots(scorecard: &mut Scorecard, clubs: &[ClubInfo], health: &[HealthSample]) {
+pub fn enrich_shots(scorecard: &mut Scorecard, clubs: &[ClubInfo], health: &[HealthSample], tempo: &[TempoSample]) {
     let club_map: std::collections::HashMap<u64, &ClubInfo> =
         clubs.iter().map(|c| (c.club_id, c)).collect();
 
@@ -402,6 +402,11 @@ pub fn enrich_shots(scorecard: &mut Scorecard, clubs: &[ClubInfo], health: &[Hea
                     shot.heart_rate      = sample.heart_rate;
                     shot.altitude_meters = sample.altitude_meters;
                     shot.timestamp       = Some(sample.timestamp);
+                }
+                // Nearest tempo sample by timestamp
+                if !tempo.is_empty() {
+                    let best_tempo = tempo.iter().min_by_key(|t| (t.timestamp - best_ts.unwrap()).abs());
+                    shot.swing_tempo = best_tempo.map(|t| t.ratio);
                 }
             }
         }
