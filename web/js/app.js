@@ -222,8 +222,7 @@ function renderDetailTabs() {
     document.getElementById('ask-ai-btn')?.addEventListener('click', async () => {
         const prompt = buildAiPrompt(round);
         await navigator.clipboard.writeText(prompt);
-        toast('Prompt copied! Opening Gemini...');
-        window.open('https://gemini.google.com', '_blank');
+        toast('Prompt copied! Paste it on gemini.google.com or chatgpt.com');
     });
 
     // Post-render hooks
