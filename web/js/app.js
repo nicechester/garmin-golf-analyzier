@@ -1268,29 +1268,45 @@ function buildAiPrompt(round) {
         });
     }
 
-    // Swing tempo timeline
-    if (round.tempo_timeline?.length > 0) {
-        L.push('\n## Swing Tempo Timeline (5-min rolling average)');
-        L.push('Time | Tempo');
-        round.tempo_timeline.forEach(t => {
-            const d = new Date((t.timestamp + GARMIN_EPOCH) * 1000);
-            const time = d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
-            L.push(`${time} | ${t.ratio.toFixed(1)}:1`);
-        });
-    }
-
-    // Health summary
+    // Health summary + full timeline
     const health = round.health_timeline;
     if (health.length > 0) {
         const bbSamples = health.filter(s => s.body_battery != null).map(s => s.body_battery);
         const stressSamples = health.filter(s => s.stress_proxy != null && s.stress_proxy > 0).map(s => s.stress_proxy);
-        L.push('\n## Health & Wellness');
+        L.push('\n## Health & Wellness Summary');
         if (bbSamples.length)
             L.push(`Body Battery: ${bbSamples[0]}% → ${bbSamples[bbSamples.length-1]}% (drained ${bbSamples[0] - bbSamples[bbSamples.length-1]}%)`);
         if (stressSamples.length) {
             const avg = Math.round(stressSamples.reduce((a,b) => a+b,0) / stressSamples.length);
             L.push(`Stress: avg ${avg}, peak ${Math.max(...stressSamples)}`);
         }
+
+        // Downsample to ~1 sample per minute
+        const totalSecs = health[health.length-1].timestamp - health[0].timestamp;
+        const avgInterval = totalSecs / health.length || 4;
+        const step = Math.max(1, Math.round(60 / avgInterval));
+        const pts = health.filter((_, i) => i % step === 0);
+
+        // Map tempo samples onto nearest health timestamp
+        const tempoByTs = {};
+        (round.tempo_timeline ?? []).forEach(t => {
+            let best = null, bestDiff = Infinity;
+            pts.forEach(s => { const d = Math.abs(s.timestamp - t.timestamp); if (d < bestDiff) { bestDiff = d; best = s.timestamp; } });
+            if (best !== null) tempoByTs[best] = t.ratio;
+        });
+
+        L.push('\n## Health Timeline (1-min intervals)');
+        L.push('Time | HR (bpm) | Altitude (m) | Stress | Tempo');
+        L.push('-----|----------|--------------|--------|------');
+        pts.forEach(s => {
+            const d = new Date((s.timestamp + GARMIN_EPOCH) * 1000);
+            const time = d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+            const hr  = s.heart_rate ?? '-';
+            const alt = s.altitude_meters != null ? Math.round(s.altitude_meters) : '-';
+            const str = s.stress_proxy ?? '-';
+            const tmp = tempoByTs[s.timestamp] != null ? `${tempoByTs[s.timestamp].toFixed(1)}:1` : '-';
+            L.push(`${time} | ${hr} | ${alt} | ${str} | ${tmp}`);
+        });
     }
 
     L.push('\n---');
