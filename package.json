@@ -1,0 +1,23 @@
+{
+  "name": "garmin-analyzer",
+  "version": "0.1.0",
+  "description": "Garmin golf round analyzer with scorecard and health data",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "npm run build && tauri build"
+  },
+  "author": "Chester Kim",
+  "license": "MIT",
+  "dependencies": {
+    "@tauri-apps/api": "^2.10.1",
+    "@tauri-apps/plugin-shell": "^2.3.4"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.9.1",
+    "vite": "^7.2.6"
+  }
+}

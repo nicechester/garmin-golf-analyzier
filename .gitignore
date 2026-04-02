@@ -1,0 +1,21 @@
+# Node
+node_modules/
+dist/
+
+# Rust
+src-tauri/target/
+
+# Store data
+*.mv
+*.mv.lock
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Logs
+*.log
