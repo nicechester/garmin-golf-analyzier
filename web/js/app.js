@@ -877,17 +877,18 @@ function renderShotMap(round) {
         const abbr = clubAbbr(shot);
         const labelLayer = holeLabelLayers[shot.hole_number];
         if (labelLayer) {
-            L.marker([shot.from.lat, shot.from.lon], {
+            const abbrMarker = L.marker([shot.from.lat, shot.from.lon], {
                 icon: L.divIcon({
                     className: '',
                     html: `<div style="font-size:12px;font-weight:700;color:${color};
                         background:rgba(255,255,255,0.9);border-radius:3px;
-                        padding:1px 3px;white-space:nowrap;pointer-events:none;
-                        text-shadow:0 0 2px white;line-height:1.4">${abbr}</div>`,
+                        padding:1px 3px;white-space:nowrap;
+                        text-shadow:0 0 2px white;line-height:1.4;cursor:pointer">${abbr}</div>`,
                     iconSize: [30, 18], iconAnchor: [-7, 9],
                 }),
-                interactive: false,
             }).addTo(labelLayer);
+            abbrMarker.bindPopup(popup);
+            abbrMarker.on('mouseover', onOver).on('mouseout', onOut);
 
             // Distance label at midpoint of line
             if (!isPutt && shot.distance_meters) {
@@ -896,17 +897,18 @@ function renderShotMap(round) {
                     (shot.from.lon + shot.to.lon) / 2,
                 ];
                 const yds = Math.round(shot.distance_meters * 1.09361);
-                L.marker(mid, {
+                const distMarker = L.marker(mid, {
                     icon: L.divIcon({
                         className: '',
                         html: `<div style="font-size:11px;color:#111827;
                             background:rgba(255,255,255,0.9);border-radius:3px;
-                            padding:1px 3px;white-space:nowrap;pointer-events:none;
-                            line-height:1.4">${yds}y</div>`,
+                            padding:1px 3px;white-space:nowrap;
+                            line-height:1.4;cursor:pointer">${yds}y</div>`,
                         iconSize: [34, 16], iconAnchor: [17, 8],
                     }),
-                    interactive: false,
                 }).addTo(labelLayer);
+                distMarker.bindPopup(popup);
+                distMarker.on('mouseover', onOver).on('mouseout', onOut);
             }
         }
     });
@@ -941,7 +943,7 @@ function renderShotMap(round) {
                         width:20px;height:20px;display:flex;align-items:center;
                         justify-content:center;font-size:10px;font-weight:700;
                         border:2px solid white;box-shadow:0 1px 3px rgba(0,0,0,0.4);
-                        cursor:pointer;flex-shrink:0">${hd.hole_number}</div>
+                        flex-shrink:0">${hd.hole_number}</div>
                     ${putts != null ? `<div style="font-size:11px;font-weight:600;color:#1e40af;
                         background:rgba(255,255,255,0.9);border-radius:3px;
                         padding:1px 4px;white-space:nowrap">${putts} putts</div>` : ''}
