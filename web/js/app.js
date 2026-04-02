@@ -854,12 +854,20 @@ function renderShotMap(round) {
             shot.swing_tempo != null ? `Tempo: ${shot.swing_tempo.toFixed(1)}:1` : null,
         ].filter(Boolean).join('<br>');
 
-        const popup = L.popup({ closeButton: false, offset: [0, -4], autoPan: false }).setContent(popupLines);
+        const popup = L.popup({ closeButton: false, autoPan: false }).setContent(popupLines);
         circle.bindPopup(popup);
         line.bindPopup(popup);
 
         // Hover: open popup + show timeline indicator; mouseout: close + clear
-        const onOver = () => { circle.openPopup(); showShotOnTimeline(shot); };
+        const onOver = () => {
+            // Flip popup below dot if near top of map
+            const mapH = activeMap.getSize().y;
+            const pt = activeMap.latLngToContainerPoint(circle.getLatLng());
+            const offset = pt.y < 120 ? [0, 10] : [0, -10];
+            popup.options.offset = offset;
+            circle.openPopup();
+            showShotOnTimeline(shot);
+        };
         const onOut  = () => { circle.closePopup(); clearShotIndicator(); };
         circle.on('mouseover', onOver).on('mouseout', onOut);
         line.on('mouseover',   () => { line.openPopup(); showShotOnTimeline(shot); })
@@ -952,8 +960,13 @@ function renderShotMap(round) {
             })
         }).addTo(activeMap);
 
-        marker.bindPopup(L.popup({ closeButton: false, offset: [0, -10], autoPan: false }).setContent(popupHtml));
-        marker.on('mouseover', () => marker.openPopup());
+        const holePopup = L.popup({ closeButton: false, autoPan: false }).setContent(popupHtml);
+        marker.bindPopup(holePopup);
+        marker.on('mouseover', () => {
+            const pt = activeMap.latLngToContainerPoint(marker.getLatLng());
+            holePopup.options.offset = pt.y < 120 ? [0, 10] : [0, -10];
+            marker.openPopup();
+        });
         marker.on('mouseout',  () => marker.closePopup());
     });
 
