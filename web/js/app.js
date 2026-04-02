@@ -531,7 +531,6 @@ function showShotOnTimeline(shot) {
         if (diff < closestDiff) { closestDiff = diff; closestIdx = i; }
     });
     if (window._setShotIndicator) window._setShotIndicator(closestIdx);
-    document.getElementById('timeline-chart')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
 function clearShotIndicator() {
@@ -854,24 +853,15 @@ function renderShotMap(round) {
             shot.swing_tempo != null ? `Tempo: ${shot.swing_tempo.toFixed(1)}:1` : null,
         ].filter(Boolean).join('<br>');
 
-        const popup = L.popup({ closeButton: false, autoPan: false }).setContent(popupLines);
+        const popup = L.popup({ closeButton: false, offset: [0, -4], autoPan: false }).setContent(popupLines);
         circle.bindPopup(popup);
         line.bindPopup(popup);
 
         // Hover: open popup + show timeline indicator; mouseout: close + clear
-        const onOver = () => {
-            const pt = activeMap.latLngToContainerPoint(circle.getLatLng());
-            const above = pt.y > 120;
-            // Shift popup anchor: above dot normally, below dot when near top
-            const anchorPt = L.point(pt.x, above ? pt.y - 8 : pt.y + 8);
-            const anchorLatLng = activeMap.containerPointToLatLng(anchorPt);
-            popup.options.offset = L.point(0, 0);
-            popup.setLatLng(anchorLatLng).openOn(activeMap);
-            showShotOnTimeline(shot);
-        };
-        const onOut = () => { activeMap.closePopup(popup); clearShotIndicator(); };
+        const onOver = () => { circle.openPopup(); showShotOnTimeline(shot); };
+        const onOut  = () => { circle.closePopup(); clearShotIndicator(); };
         circle.on('mouseover', onOver).on('mouseout', onOut);
-        line.on('mouseover', () => { const pt = activeMap.latLngToContainerPoint(circle.getLatLng()); const above = pt.y > 120; const anchorPt = L.point(pt.x, above ? pt.y - 8 : pt.y + 8); popup.setLatLng(activeMap.containerPointToLatLng(anchorPt)).openOn(activeMap); showShotOnTimeline(shot); })
+        line.on('mouseover', () => { line.openPopup(); showShotOnTimeline(shot); })
             .on('mouseout', onOut);
 
         // Arrowhead dot at destination (skip for putts — destination is the hole)
@@ -963,13 +953,8 @@ function renderShotMap(round) {
 
         const holePopup = L.popup({ closeButton: false, autoPan: false }).setContent(popupHtml);
         marker.bindPopup(holePopup);
-        marker.on('mouseover', () => {
-            const pt = activeMap.latLngToContainerPoint(marker.getLatLng());
-            const above = pt.y > 120;
-            const anchorPt = L.point(pt.x, above ? pt.y - 8 : pt.y + 8);
-            holePopup.setLatLng(activeMap.containerPointToLatLng(anchorPt)).openOn(activeMap);
-        });
-        marker.on('mouseout', () => activeMap.closePopup(holePopup));
+        marker.on('mouseover', () => marker.openPopup());
+        marker.on('mouseout',  () => marker.closePopup());
     });
 
     // Legend
