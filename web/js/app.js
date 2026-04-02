@@ -860,12 +860,11 @@ function renderShotMap(round) {
 
         // Hover: open popup + show timeline indicator; mouseout: close + clear
         const onOver = () => {
-            // Flip popup below dot if near top of map
-            const mapH = activeMap.getSize().y;
             const pt = activeMap.latLngToContainerPoint(circle.getLatLng());
-            const offset = pt.y < 120 ? [0, 10] : [0, -10];
-            popup.options.offset = offset;
+            const above = pt.y > 120;
+            popup.options.offset = L.point(0, above ? -10 : 10);
             circle.openPopup();
+            popup.update();
             showShotOnTimeline(shot);
         };
         const onOut  = () => { circle.closePopup(); clearShotIndicator(); };
@@ -964,8 +963,9 @@ function renderShotMap(round) {
         marker.bindPopup(holePopup);
         marker.on('mouseover', () => {
             const pt = activeMap.latLngToContainerPoint(marker.getLatLng());
-            holePopup.options.offset = pt.y < 120 ? [0, 10] : [0, -10];
+            holePopup.options.offset = L.point(0, pt.y > 120 ? -10 : 10);
             marker.openPopup();
+            holePopup.update();
         });
         marker.on('mouseout',  () => marker.closePopup());
     });
