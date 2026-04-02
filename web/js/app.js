@@ -772,8 +772,12 @@ function renderShotMap(round) {
         [Math.max(...lats), Math.max(...lons)],
     ];
 
-    // Init Leaflet map
-    activeMap = L.map('shot-map').fitBounds(bounds, { padding: [30, 30] });
+    // Init Leaflet map — scroll zoom disabled, only +/- buttons
+    activeMap = L.map('shot-map', {
+        scrollWheelZoom: false,
+        doubleClickZoom: false,
+        touchZoom: false,
+    }).fitBounds(bounds, { padding: [30, 30] });
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         attribution: '© OpenStreetMap contributors',
         maxZoom: 19,
@@ -785,7 +789,26 @@ function renderShotMap(round) {
 
     // Layer groups per hole for filtering
     const holeLayers = {};
-    sc.hole_scores.forEach(hs => { holeLayers[hs.hole_number] = L.layerGroup().addTo(activeMap); });
+    const holeLabelLayers = {}; // club abbr + distance labels, shown only when zoomed to a hole
+    sc.hole_scores.forEach(hs => {
+        holeLayers[hs.hole_number] = L.layerGroup().addTo(activeMap);
+        holeLabelLayers[hs.hole_number] = L.layerGroup(); // not added yet
+    });
+
+    // Club abbreviation helper
+    function clubAbbr(shot) {
+        const name = shot.club_name ?? '';
+        const cat  = shot.club_category ?? '';
+        if (cat === 'putt') return 'P';
+        if (!name) return cat.slice(0,1).toUpperCase();
+        // e.g. "Driver"->"Dr", "3-Wood"->"W3", "7-Iron"->"I7", "PW"->"PW", "SW"->"SW"
+        const m = name.match(/^(\d+)[-\s]?(Wood|Iron|W|I)/i);
+        if (m) return (name.includes('Iron') || name.includes('I') ? 'I' : 'W') + m[1];
+        if (name.length <= 3) return name;
+        if (name === 'Driver') return 'Dr';
+        if (name === 'Hybrid') return 'Hy';
+        return name.slice(0, 2);
+    }
 
     // Draw shots (including putts)
     // Build per-hole shot index for putt count lookup
@@ -848,6 +871,43 @@ function renderShotMap(round) {
                 radius: 3, color, weight: 0,
                 fillColor: color, fillOpacity: 0.6,
             }).addTo(layer);
+        }
+
+        // Club abbr label next to origin dot
+        const abbr = clubAbbr(shot);
+        const labelLayer = holeLabelLayers[shot.hole_number];
+        if (labelLayer) {
+            L.marker([shot.from.lat, shot.from.lon], {
+                icon: L.divIcon({
+                    className: '',
+                    html: `<div style="font-size:9px;font-weight:700;color:${color};
+                        background:rgba(255,255,255,0.85);border-radius:3px;
+                        padding:0 2px;white-space:nowrap;pointer-events:none;
+                        text-shadow:0 0 2px white;line-height:1.4">${abbr}</div>`,
+                    iconSize: [24, 14], iconAnchor: [-6, 7],
+                }),
+                interactive: false,
+            }).addTo(labelLayer);
+
+            // Distance label at midpoint of line
+            if (!isPutt && shot.distance_meters) {
+                const mid = [
+                    (shot.from.lat + shot.to.lat) / 2,
+                    (shot.from.lon + shot.to.lon) / 2,
+                ];
+                const yds = Math.round(shot.distance_meters * 1.09361);
+                L.marker(mid, {
+                    icon: L.divIcon({
+                        className: '',
+                        html: `<div style="font-size:8px;color:#374151;
+                            background:rgba(255,255,255,0.85);border-radius:3px;
+                            padding:0 2px;white-space:nowrap;pointer-events:none;
+                            line-height:1.4">${yds}y</div>`,
+                        iconSize: [28, 12], iconAnchor: [14, 6],
+                    }),
+                    interactive: false,
+                }).addTo(labelLayer);
+            }
         }
     });
 
@@ -915,9 +975,18 @@ function renderShotMap(round) {
 
             const holeFilter = btn.dataset.hole;
 
-            // Show/hide layers
+            // Show/hide shot layers
             Object.entries(holeLayers).forEach(([holeNum, layer]) => {
                 if (holeFilter === 'all' || holeNum === holeFilter) {
+                    activeMap.addLayer(layer);
+                } else {
+                    activeMap.removeLayer(layer);
+                }
+            });
+
+            // Show labels only when a single hole is selected
+            Object.entries(holeLabelLayers).forEach(([holeNum, layer]) => {
+                if (holeFilter !== 'all' && holeNum === holeFilter) {
                     activeMap.addLayer(layer);
                 } else {
                     activeMap.removeLayer(layer);
