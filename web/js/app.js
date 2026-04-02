@@ -854,7 +854,7 @@ function renderShotMap(round) {
             shot.swing_tempo != null ? `Tempo: ${shot.swing_tempo.toFixed(1)}:1` : null,
         ].filter(Boolean).join('<br>');
 
-        const popup = L.popup({ closeButton: false, offset: [0, -4] }).setContent(popupLines);
+        const popup = L.popup({ closeButton: false, offset: [0, -4], autoPan: false }).setContent(popupLines);
         circle.bindPopup(popup);
         line.bindPopup(popup);
 
@@ -952,7 +952,7 @@ function renderShotMap(round) {
             })
         }).addTo(activeMap);
 
-        marker.bindPopup(L.popup({ closeButton: false, offset: [0, -10] }).setContent(popupHtml));
+        marker.bindPopup(L.popup({ closeButton: false, offset: [0, -10], autoPan: false }).setContent(popupHtml));
         marker.on('mouseover', () => marker.openPopup());
         marker.on('mouseout',  () => marker.closePopup());
     });
