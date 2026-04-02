@@ -256,6 +256,7 @@ pub struct GolfRound {
     pub min_altitude_meters: Option<f32>,
     pub max_altitude_meters: Option<f32>,
     pub avg_swing_tempo: Option<f32>,
+    #[serde(default)]
     pub tempo_timeline: Vec<TempoSample>,
     pub shots: Vec<GolfShot>,
     pub health_timeline: Vec<HealthSample>,
