@@ -180,11 +180,18 @@ function renderDetailTabs() {
     ];
 
     const tabBar = `
-    <div class="flex border-b bg-white sticky top-0 z-10 pt-4 mb-4">
+    <div class="flex items-center border-b bg-white sticky top-0 z-10 pt-4 mb-4">
+        <div class="flex flex-1">
         ${tabs.map(t => `
         <button class="detail-tab ${state.activeTab === t.id ? 'active' : ''}" data-tab="${t.id}">
             ${t.label}
         </button>`).join('')}
+        </div>
+        <button id="ask-ai-btn"
+            class="mr-4 mb-1 px-3 py-1.5 text-xs font-medium rounded-lg border border-purple-300
+                   text-purple-700 hover:bg-purple-50 transition flex items-center gap-1.5">
+            <span>✨</span> Ask AI
+        </button>
     </div>`;
 
     let tabContent = '';
@@ -209,6 +216,14 @@ function renderDetailTabs() {
             state.activeTab = btn.dataset.tab;
             renderDetailTabs();
         });
+    });
+
+    // Ask AI button
+    document.getElementById('ask-ai-btn')?.addEventListener('click', async () => {
+        const prompt = buildAiPrompt(round);
+        await navigator.clipboard.writeText(prompt);
+        toast('Prompt copied! Opening Gemini...');
+        window.open('https://gemini.google.com', '_blank');
     });
 
     // Post-render hooks
@@ -1189,6 +1204,98 @@ function buildClubSummary(enriched) {
             <tbody>${rows}</tbody>
         </table>
     </div>`;
+}
+
+// ── AI Prompt Builder ────────────────────────────────────────────────────────
+
+function buildAiPrompt(round) {
+    const sc = round.scorecard;
+    const dt = new Date((round.start_ts + GARMIN_EPOCH) * 1000);
+    const dateStr = dt.toLocaleDateString('en-US', { weekday:'long', year:'numeric', month:'long', day:'numeric' });
+    const parMap = sc ? Object.fromEntries(sc.hole_definitions.map(h => [h.hole_number, h])) : {};
+    const scoredPar = sc ? sc.hole_scores.reduce((s, hs) => s + (parMap[hs.hole_number]?.par ?? 0), 0) : 0;
+    const overPar = sc ? sc.total_score - scoredPar : 0;
+
+    const L = [];
+    L.push('Please analyze my golf round comprehensively and provide insights on performance, patterns, and areas for improvement.\n');
+
+    // Round summary
+    L.push('## Round Summary');
+    L.push(`Date: ${dateStr}`);
+    L.push(`Course: ${sc?.course_name ?? 'Unknown'} (${sc?.tee_color ?? ''} tees, Rating ${sc?.course_rating ?? ''}, Slope ${sc?.slope ?? ''})`);
+    L.push(`Score: ${sc?.total_score ?? '—'} (${overPar >= 0 ? '+' : ''}${overPar}) over par ${scoredPar}`);
+    L.push(`Holes: ${sc?.hole_scores.length ?? '—'}, Duration: ${Math.round(round.duration_seconds / 60)} min, Distance: ${(round.distance_meters / 1000).toFixed(2)} km`);
+    L.push(`Calories: ${round.calories ?? '—'}, Avg HR: ${round.avg_heart_rate ?? '—'} bpm, Max HR: ${round.max_heart_rate ?? '—'} bpm`);
+    if (round.min_altitude_meters != null)
+        L.push(`Altitude: ${Math.round(round.min_altitude_meters)}–${Math.round(round.max_altitude_meters)} m`);
+    if (round.avg_swing_tempo != null)
+        L.push(`Avg swing tempo: ${round.avg_swing_tempo.toFixed(1)}:1`);
+
+    // Scorecard
+    if (sc) {
+        L.push('\n## Hole-by-Hole Scorecard');
+        L.push('Hole | Par | Score | +/- | Putts | FW | Shots | Clubs');
+        L.push('-----|-----|-------|-----|-------|----|-------|------');
+        sc.hole_scores.forEach(hs => {
+            const def = parMap[hs.hole_number];
+            const par = def?.par ?? 0;
+            const diff = hs.score - par;
+            const diffStr = diff === 0 ? 'E' : (diff > 0 ? `+${diff}` : `${diff}`);
+            const fw = par === 3 ? 'n/a' : (hs.fairway_hit ? 'Y' : 'N');
+            const clubs = [...new Set(hs.shots.filter(s => s.club_name).map(s => s.club_name))].join(', ') || '—';
+            L.push(`H${hs.hole_number} | ${par} | ${hs.score} | ${diffStr} | ${hs.putts} | ${fw} | ${hs.shots.length} | ${clubs}`);
+        });
+        L.push(`Total | ${scoredPar} | ${sc.total_score} | ${overPar >= 0 ? '+' : ''}${overPar} | ${sc.total_putts} | ${sc.fairways_hit} FW | |`);
+    }
+
+    // Shot details
+    if (sc) {
+        L.push('\n## Shot Details');
+        sc.hole_scores.forEach(hs => {
+            const def = parMap[hs.hole_number];
+            const distYds = def?.distance_cm ? Math.round(def.distance_cm / 91.44) : '?';
+            L.push(`\nHole ${hs.hole_number} (Par ${def?.par ?? '?'}, ${distYds} yds):`);
+            hs.shots.forEach((shot, i) => {
+                const parts = [
+                    `  Shot ${i+1}: ${shot.club_name ?? shot.club_category ?? 'Unknown'}`,
+                    shot.distance_meters ? `${Math.round(shot.distance_meters)}m` : null,
+                    shot.heart_rate      ? `HR ${shot.heart_rate}bpm` : null,
+                    shot.altitude_meters ? `Alt ${Math.round(shot.altitude_meters)}m` : null,
+                    shot.swing_tempo     ? `Tempo ${shot.swing_tempo.toFixed(1)}:1` : null,
+                ].filter(Boolean);
+                L.push(parts.join(', '));
+            });
+        });
+    }
+
+    // Swing tempo timeline
+    if (round.tempo_timeline?.length > 0) {
+        L.push('\n## Swing Tempo Timeline (5-min rolling average)');
+        L.push('Time | Tempo');
+        round.tempo_timeline.forEach(t => {
+            const d = new Date((t.timestamp + GARMIN_EPOCH) * 1000);
+            const time = d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+            L.push(`${time} | ${t.ratio.toFixed(1)}:1`);
+        });
+    }
+
+    // Health summary
+    const health = round.health_timeline;
+    if (health.length > 0) {
+        const bbSamples = health.filter(s => s.body_battery != null).map(s => s.body_battery);
+        const stressSamples = health.filter(s => s.stress_proxy != null && s.stress_proxy > 0).map(s => s.stress_proxy);
+        L.push('\n## Health & Wellness');
+        if (bbSamples.length)
+            L.push(`Body Battery: ${bbSamples[0]}% → ${bbSamples[bbSamples.length-1]}% (drained ${bbSamples[0] - bbSamples[bbSamples.length-1]}%)`);
+        if (stressSamples.length) {
+            const avg = Math.round(stressSamples.reduce((a,b) => a+b,0) / stressSamples.length);
+            L.push(`Stress: avg ${avg}, peak ${Math.max(...stressSamples)}`);
+        }
+    }
+
+    L.push('\n---');
+    L.push('Please provide: 1) Overall performance summary, 2) Strengths, 3) Areas for improvement, 4) Patterns (tempo, HR, stress vs score), 5) Specific recommendations.');
+    return L.join('\n');
 }
 
 // ── Event handlers ───────────────────────────────────────────────────────────
