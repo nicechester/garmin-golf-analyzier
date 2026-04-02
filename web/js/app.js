@@ -799,7 +799,7 @@ function renderShotMap(round) {
         const cat    = shot.club_category ?? 'unknown';
         const color  = CLUB_COLORS[cat] ?? CLUB_COLORS.unknown;
         const club   = shot.club_name ?? (cat === 'putt' ? 'Putter' : cat);
-        const dist   = shot.distance_meters ? `${Math.round(shot.distance_meters)}m` : '';
+        const dist   = shot.distance_meters ? `${Math.round(shot.distance_meters * 1.09361)}yds` : '';
         const hr     = shot.heart_rate ? `${shot.heart_rate}bpm` : '';
         const alt    = shot.altitude_meters ? `${Math.round(shot.altitude_meters)}m alt` : '';
         const isPutt = cat === 'putt';
@@ -1257,7 +1257,7 @@ function buildAiPrompt(round) {
             hs.shots.forEach((shot, i) => {
                 const parts = [
                     `  Shot ${i+1}: ${shot.club_name ?? shot.club_category ?? 'Unknown'}`,
-                    shot.distance_meters ? `${Math.round(shot.distance_meters)}m` : null,
+                    shot.distance_meters ? `${Math.round(shot.distance_meters * 1.09361)}yds` : null,
                     shot.heart_rate      ? `HR ${shot.heart_rate}bpm` : null,
                     shot.altitude_meters ? `Alt ${Math.round(shot.altitude_meters)}m` : null,
                     shot.swing_tempo     ? `Tempo ${shot.swing_tempo.toFixed(1)}:1` : null,
