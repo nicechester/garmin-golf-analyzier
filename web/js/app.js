@@ -2089,6 +2089,100 @@ function buildAiPrompt(round) {
         sg.shots.forEach(s => {
             L.push(`H${s.hole} | S${s.shotNum} | ${s.club} | ${s.distBefore}yds | ${s.sg >= 0 ? '+' : ''}${s.sg.toFixed(2)}`);
         });
+
+        // Club analysis: tendency and consistency
+        const sc = round.scorecard;
+        if (sc?.hole_scores?.length) {
+            const dirMap = {};
+            sc.hole_scores.forEach(hs => {
+                const shots = hs.shots;
+                if (!shots.length) return;
+                const holeBear = bearing(shots[0].from, shots[shots.length - 1].to);
+                shots.forEach((shot, idx) => {
+                    if ((shot.club_category ?? '') === 'putt') return;
+                    const dev = deviation(bearing(shot.from, shot.to), holeBear);
+                    const dist = metersToYards(distMeters(shot.from, shot.to));
+                    dirMap[`${hs.hole_number}-${idx}`] = { dev, dist };
+                });
+            });
+
+            const byClub = {};
+            sg.shots.filter(s => s.cat !== 'putting').forEach(s => {
+                if (!byClub[s.club]) byClub[s.club] = [];
+                const dir = dirMap[`${s.hole}-${s.shotIdx}`];
+                byClub[s.club].push({ ...s, dev: dir?.dev ?? 0, distYds: dir?.dist ?? s.distBefore });
+            });
+
+            const clubEntries = Object.entries(byClub).filter(([, arr]) => arr.length >= 2);
+            if (clubEntries.length) {
+                L.push('\n## Club Analysis (Tendency & Consistency)');
+                L.push('Club | Shots | Avg Dist | Std Dev | Avg Deviation | Left% | Straight% | Right% | Avg SG');
+                L.push('-----|-------|---------|---------|---------------|-------|-----------|--------|------');
+                clubEntries.sort((a, b) => {
+                    const avgA = a[1].reduce((s, x) => s + x.distYds, 0) / a[1].length;
+                    const avgB = b[1].reduce((s, x) => s + x.distYds, 0) / b[1].length;
+                    return avgB - avgA;
+                }).forEach(([name, arr]) => {
+                    const dists = arr.map(s => s.distYds);
+                    const devs = arr.map(s => s.dev);
+                    const avgDist = Math.round(dists.reduce((a, b) => a + b, 0) / dists.length);
+                    const mean = dists.reduce((a, b) => a + b, 0) / dists.length;
+                    const std = Math.round(Math.sqrt(dists.reduce((a, v) => a + (v - mean) ** 2, 0) / (dists.length - 1)));
+                    const avgDev = Math.round(devs.reduce((a, b) => a + b, 0) / devs.length);
+                    const left = Math.round(arr.filter(s => s.dev <= -15).length / arr.length * 100);
+                    const right = Math.round(arr.filter(s => s.dev >= 15).length / arr.length * 100);
+                    const straight = 100 - left - right;
+                    const avgSg = (arr.reduce((a, s) => a + s.sg, 0) / arr.length);
+                    L.push(`${name} | ${arr.length} | ${avgDist}yds | ±${std} | ${avgDev >= 0 ? '+' : ''}${avgDev}° | ${left}% | ${straight}% | ${right}% | ${avgSg >= 0 ? '+' : ''}${avgSg.toFixed(2)}`);
+                });
+            }
+
+            // Shot dispersion by distance bucket
+            const allDispShots = [];
+            sc.hole_scores.forEach(hs => {
+                const shots = hs.shots;
+                if (!shots.length) return;
+                const green = shots[shots.length - 1].to;
+                const holeBear = bearing(shots[0].from, green);
+                shots.forEach((shot, idx) => {
+                    if ((shot.club_category ?? '') === 'putt') return;
+                    const distToGreen = metersToYards(distMeters(shot.from, green));
+                    const shotDist = metersToYards(distMeters(shot.from, shot.to));
+                    const dev = deviation(bearing(shot.from, shot.to), holeBear);
+                    const distPct = distToGreen > 0 ? ((shotDist - distToGreen) / distToGreen) * 100 : 0;
+                    const sgShot = sg.shots.find(s => s.hole === hs.hole_number && s.shotIdx === idx);
+                    allDispShots.push({ distToGreen: Math.round(distToGreen), dev, distPct, sg: sgShot?.sg ?? 0 });
+                });
+            });
+
+            const buckets = [
+                { label: '0-50 yds', min: 0, max: 50 },
+                { label: '51-100 yds', min: 51, max: 100 },
+                { label: '101-150 yds', min: 101, max: 150 },
+                { label: '151-200 yds', min: 151, max: 200 },
+                { label: '200+ yds', min: 201, max: 999 },
+            ];
+
+            const dispBuckets = buckets.map(b => ({
+                ...b, shots: allDispShots.filter(s => s.distToGreen >= b.min && s.distToGreen <= b.max)
+            })).filter(b => b.shots.length >= 2);
+
+            if (dispBuckets.length) {
+                L.push('\n## Shot Dispersion Patterns');
+                dispBuckets.forEach(b => {
+                    const avgSg = (b.shots.reduce((a, s) => a + s.sg, 0) / b.shots.length);
+                    const avgDev = Math.round(b.shots.reduce((a, s) => a + s.dev, 0) / b.shots.length);
+                    const avgDistPct = (b.shots.reduce((a, s) => a + s.distPct, 0) / b.shots.length).toFixed(1);
+                    const left = b.shots.filter(s => s.dev <= -10).length;
+                    const right = b.shots.filter(s => s.dev >= 10).length;
+                    const short = b.shots.filter(s => s.distPct < -5).length;
+                    const long = b.shots.filter(s => s.distPct > 5).length;
+                    L.push(`\n${b.label} (${b.shots.length} shots, avg SG ${avgSg >= 0 ? '+' : ''}${avgSg.toFixed(2)}):`);
+                    L.push(`  Direction: avg ${avgDev >= 0 ? '+' : ''}${avgDev}° | ${left} left, ${b.shots.length - left - right} straight, ${right} right`);
+                    L.push(`  Distance: avg ${avgDistPct}% of target | ${short} short, ${b.shots.length - short - long} good, ${long} long`);
+                });
+            }
+        }
     }
 
     // Health summary + full timeline
