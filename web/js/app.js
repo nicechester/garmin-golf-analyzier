@@ -1710,6 +1710,18 @@ function buildStrokesGainedTab(round) {
                 <tbody>${holeRows}</tbody>
             </table>
         </div>
+    </div>
+    <div class="bg-gray-50 rounded-xl border border-gray-200 p-6 text-sm text-gray-500 leading-relaxed">
+        <h4 class="font-semibold text-gray-600 mb-2">How Strokes Gained Works</h4>
+        <p class="mb-2">Strokes Gained, developed by Mark Broadie in <i>Every Shot Counts</i>, measures each shot's value by comparing your result to what a benchmark golfer (here, a 15-handicap) would expect from the same position.</p>
+        <p class="mb-2"><b>SG = Expected strokes before − 1 − Expected strokes after.</b> A positive value means you gained strokes (did better than baseline); negative means you lost strokes.</p>
+        <div class="grid grid-cols-2 gap-x-6 gap-y-1 mt-3 text-xs">
+            <div><span class="font-medium text-gray-600">SG: Off the Tee</span> — Tee shots on par 4s and 5s</div>
+            <div><span class="font-medium text-gray-600">SG: Approach</span> — Shots into the green from 50+ yards</div>
+            <div><span class="font-medium text-gray-600">SG: Short Game</span> — Non-putt shots within 50 yards</div>
+            <div><span class="font-medium text-gray-600">SG: Putting</span> — All putts on the green</div>
+        </div>
+        <p class="mt-3 text-xs text-gray-400">Lie detection is approximate — fairway/rough is inferred from the fairway-hit flag on tee shots. Baseline data is interpolated from Broadie's published 15-handicap amateur tables.</p>
     </div>`;
 }
 
