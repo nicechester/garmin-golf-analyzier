@@ -5,7 +5,7 @@ const PAGE_SIZE = 10;
 const state = {
     rounds: [],
     activeId: null,
-    activeTab: 'overview',  // 'overview' | 'shotmap' | 'stats'
+    activeTab: 'overview',  // 'overview' | 'shotmap' | 'stats' | 'sg'
     searchTerm: '',
     syncOffset: 0,
     syncing: false,
@@ -177,6 +177,7 @@ function renderDetailTabs() {
         { id: 'overview', label: 'Overview' },
         { id: 'shotmap',  label: 'Shot Map' },
         { id: 'stats',    label: 'Course Stats' },
+        { id: 'sg',       label: 'Strokes Gained' },
     ];
 
     const tabBar = `
@@ -205,6 +206,8 @@ function renderDetailTabs() {
         tabContent = buildShotMap(round);
     } else if (state.activeTab === 'stats') {
         tabContent = buildCourseStats(round);
+    } else if (state.activeTab === 'sg') {
+        tabContent = buildStrokesGainedTab(round);
     }
 
     content.innerHTML = tabBar + `<div class="space-y-6 pb-6">${tabContent}</div>`;
@@ -881,6 +884,10 @@ function renderShotMap(round) {
     const holePutts = {};
     sc.hole_scores.forEach(hs => { holePutts[hs.hole_number] = hs.putts; });
 
+    // Pre-compute SG lookup for shot popups
+    const sgLookup = buildSgLookup(round);
+    const holeShotIdx = {}; // track per-hole shot index for SG key
+
     // Pre-compute hole bearing (tee→green) per hole — matches Course Stats deviation calc
     const holeBearings = {};
     sc.hole_scores.forEach(hs => {
@@ -923,6 +930,9 @@ function renderShotMap(round) {
         }
 
         // Popup content — 2-column layout
+        const shotIdxInHole = holeShotIdx[shot.hole_number] ?? 0;
+        holeShotIdx[shot.hole_number] = shotIdxInHole + 1;
+        const sgVal = sgLookup[`${shot.hole_number}-${shotIdxInHole}`];
         const spark = hr ? hrSparkline(shot, round.health_timeline) : '';
         const leftLines = [
             `<b>H${shot.hole_number} ${isPutt ? 'Putt' : `Shot ${shotNum}`}</b>`,
@@ -931,6 +941,7 @@ function renderShotMap(round) {
             isPutt ? `Putts: ${holePutts[shot.hole_number] ?? '?'}` : null,
             alt ? `Alt: ${alt}` : null,
             shot.swing_tempo != null ? `Tempo: ${shot.swing_tempo.toFixed(1)}:1` : null,
+            sgVal != null ? `SG: ${sgBadge(sgVal)}` : null,
         ].filter(Boolean).join('<br>');
         const rightParts = [dirHtml, hr ? `<div style="text-align:center;font-size:11px;color:#666">${hr}</div>${spark}` : ''].filter(Boolean).join('');
         const popupHtml = rightParts
@@ -1396,6 +1407,312 @@ function buildClubSummary(enriched) {
     </div>`;
 }
 
+// ── Strokes Gained (Broadie / Every Shot Counts) ─────────────────────────────
+
+// 15-handicap baseline: expected strokes to hole out from given distance (yards).
+// Sources: Mark Broadie "Every Shot Counts" amateur tables, interpolated.
+// Keys: distance in yards → expected strokes. We interpolate between entries.
+const SG_BASELINE_TEE = [
+    // distance, expected strokes (from tee box)
+    [100, 2.92], [125, 2.99], [150, 3.07], [175, 3.17], [200, 3.32],
+    [225, 3.45], [250, 3.58], [275, 3.71], [300, 3.84], [325, 3.97],
+    [350, 4.08], [375, 4.17], [400, 4.28], [425, 4.41], [450, 4.54],
+    [475, 4.65], [500, 4.79], [525, 4.92], [550, 5.06], [575, 5.19], [600, 5.32],
+];
+const SG_BASELINE_FAIRWAY = [
+    // distance, expected strokes (from fairway)
+    [20, 2.70], [30, 2.75], [40, 2.80], [50, 2.87], [60, 2.93],
+    [80, 3.02], [100, 3.12], [120, 3.25], [140, 3.39], [150, 3.47],
+    [160, 3.54], [175, 3.65], [200, 3.82], [225, 4.00], [250, 4.18], [275, 4.36],
+];
+const SG_BASELINE_ROUGH = [
+    // distance, expected strokes (from rough — ~0.2 penalty over fairway)
+    [20, 2.86], [30, 2.92], [40, 2.97], [50, 3.05], [60, 3.12],
+    [80, 3.22], [100, 3.33], [120, 3.47], [140, 3.62], [150, 3.70],
+    [160, 3.78], [175, 3.90], [200, 4.08], [225, 4.27], [250, 4.46],
+];
+const SG_BASELINE_GREEN = [
+    // distance in feet, expected putts
+    [1, 1.00], [2, 1.04], [3, 1.14], [4, 1.23], [5, 1.33],
+    [6, 1.42], [8, 1.56], [10, 1.67], [15, 1.82], [20, 1.93],
+    [25, 2.03], [30, 2.12], [40, 2.25], [50, 2.35], [60, 2.44], [90, 2.64],
+];
+
+function interpolateBaseline(table, dist) {
+    if (dist <= table[0][0]) return table[0][1];
+    if (dist >= table[table.length - 1][0]) return table[table.length - 1][1];
+    for (let i = 0; i < table.length - 1; i++) {
+        if (dist >= table[i][0] && dist <= table[i + 1][0]) {
+            const t = (dist - table[i][0]) / (table[i + 1][0] - table[i][0]);
+            return table[i][1] + t * (table[i + 1][1] - table[i][1]);
+        }
+    }
+    return table[table.length - 1][1];
+}
+
+// Expected strokes from a position. lie: 'tee' | 'fairway' | 'rough' | 'green'
+function expectedStrokes(distYards, lie) {
+    if (lie === 'green') return interpolateBaseline(SG_BASELINE_GREEN, distYards * 3); // yards→feet
+    if (lie === 'tee') return interpolateBaseline(SG_BASELINE_TEE, distYards);
+    if (lie === 'rough') return interpolateBaseline(SG_BASELINE_ROUGH, distYards);
+    return interpolateBaseline(SG_BASELINE_FAIRWAY, distYards);
+}
+
+// Compute strokes gained for an entire round. Returns { shots: [...], categories: {...} }
+function computeStrokesGained(round) {
+    const sc = round.scorecard;
+    if (!sc?.hole_scores?.length) return null;
+
+    const sgShots = [];
+    sc.hole_scores.forEach(hs => {
+        const holeDef = sc.hole_definitions.find(h => h.hole_number === hs.hole_number);
+        const shots = hs.shots;
+        if (!shots.length) return;
+
+        const green = shots[shots.length - 1].to; // last shot destination = hole location
+
+        shots.forEach((shot, idx) => {
+            const cat = shot.club_category ?? 'unknown';
+            const isPutt = cat === 'putt';
+            const isLastShot = idx === shots.length - 1;
+
+            // Distance from shot origin to green
+            const distBefore = metersToYards(distMeters(shot.from, green));
+            // Distance from shot destination to green
+            const distAfter = isLastShot ? 0 : metersToYards(distMeters(shot.to, green));
+
+            // Determine lie
+            let lieBefore, lieAfter;
+            if (idx === 0) {
+                lieBefore = 'tee';
+            } else if (isPutt) {
+                lieBefore = 'green';
+            } else if (distBefore < 50) {
+                lieBefore = 'fairway'; // short game — treat as fairway
+            } else {
+                // Use fairway_hit flag for 2nd shot on par 4/5 (tee shot hit fairway)
+                lieBefore = (idx === 1 && hs.fairway_hit) ? 'fairway' : 'rough';
+            }
+
+            if (isLastShot) {
+                lieAfter = 'holed';
+            } else {
+                const nextCat = shots[idx + 1]?.club_category;
+                lieAfter = nextCat === 'putt' ? 'green' : (lieBefore === 'tee' && hs.fairway_hit ? 'fairway' : 'fairway');
+            }
+
+            const expBefore = expectedStrokes(distBefore, lieBefore);
+            const expAfter = isLastShot ? 0 : expectedStrokes(distAfter, lieAfter);
+            // SG = expected_before - (1 + expected_after)
+            const sg = expBefore - 1 - expAfter;
+
+            // Categorize: off-tee, approach, short-game, putting
+            let sgCat;
+            if (isPutt) {
+                sgCat = 'putting';
+            } else if (idx === 0 && (holeDef?.par ?? 0) >= 4) {
+                sgCat = 'off_tee';
+            } else if (distBefore < 50) {
+                sgCat = 'short_game';
+            } else {
+                sgCat = 'approach';
+            }
+
+            sgShots.push({
+                hole: hs.hole_number,
+                shotIdx: idx,
+                shotNum: idx + 1,
+                club: shot.club_name ?? cat,
+                cat: sgCat,
+                distBefore: Math.round(distBefore),
+                distAfter: Math.round(distAfter),
+                lieBefore,
+                sg: +sg.toFixed(3),
+                from: shot.from,
+                to: shot.to,
+            });
+        });
+    });
+
+    // Aggregate by category
+    const cats = { off_tee: 0, approach: 0, short_game: 0, putting: 0 };
+    const catCounts = { off_tee: 0, approach: 0, short_game: 0, putting: 0 };
+    sgShots.forEach(s => {
+        if (cats[s.cat] !== undefined) {
+            cats[s.cat] += s.sg;
+            catCounts[s.cat]++;
+        }
+    });
+    const total = Object.values(cats).reduce((a, b) => a + b, 0);
+
+    return { shots: sgShots, categories: cats, catCounts, total };
+}
+
+// Build a per-shot SG lookup keyed by "hole-shotIdx" for shot map popups
+function buildSgLookup(round) {
+    const sg = computeStrokesGained(round);
+    if (!sg) return {};
+    const map = {};
+    sg.shots.forEach(s => { map[`${s.hole}-${s.shotIdx}`] = s.sg; });
+    return map;
+}
+
+function sgColor(val) {
+    if (val >= 0.3) return '#16a34a';  // strong gain
+    if (val >= 0)   return '#22c55e';  // slight gain
+    if (val >= -0.3) return '#f97316'; // slight loss
+    return '#ef4444';                  // strong loss
+}
+
+function sgBadge(val) {
+    if (val == null) return '';
+    const sign = val >= 0 ? '+' : '';
+    const c = sgColor(val);
+    return `<span style="color:${c};font-weight:600;font-size:11px">${sign}${val.toFixed(2)}</span>`;
+}
+
+function buildStrokesGainedTab(round) {
+    const sg = computeStrokesGained(round);
+    if (!sg) return `<div class="bg-white rounded-xl shadow-sm border p-6">
+        <p class="text-gray-400 text-sm">No scorecard data for Strokes Gained analysis.</p></div>`;
+
+    const catLabels = {
+        off_tee: 'Off the Tee', approach: 'Approach',
+        short_game: 'Short Game', putting: 'Putting'
+    };
+    const catIcons = {
+        off_tee: '🏌️', approach: '🎯', short_game: '⛳', putting: '🏁'
+    };
+
+    // Summary cards
+    const totalCard = `
+        <div class="bg-gray-50 rounded-lg p-4 text-center col-span-2 md:col-span-1">
+            <div class="text-2xl font-bold" style="color:${sgColor(sg.total)}">
+                ${sg.total >= 0 ? '+' : ''}${sg.total.toFixed(1)}
+            </div>
+            <div class="text-xs text-gray-500 mt-1">Total SG</div>
+        </div>`;
+
+    const catCards = Object.entries(catLabels).map(([key, label]) => {
+        const val = sg.categories[key];
+        const count = sg.catCounts[key];
+        return `
+        <div class="bg-gray-50 rounded-lg p-4 text-center">
+            <div class="text-lg font-bold" style="color:${sgColor(val)}">
+                ${val >= 0 ? '+' : ''}${val.toFixed(2)}
+            </div>
+            <div class="text-xs text-gray-500 mt-1">${catIcons[key]} ${label}</div>
+            <div class="text-xs text-gray-400">${count} shots</div>
+        </div>`;
+    }).join('');
+
+    // Category bar chart
+    const maxAbs = Math.max(0.5, ...Object.values(sg.categories).map(Math.abs));
+    const barChart = Object.entries(catLabels).map(([key, label]) => {
+        const val = sg.categories[key];
+        const pct = Math.abs(val) / maxAbs * 100;
+        const isPos = val >= 0;
+        return `
+        <div class="flex items-center gap-3">
+            <div class="w-24 text-xs text-gray-600 text-right">${label}</div>
+            <div class="flex-1 flex items-center" style="height:24px">
+                <div class="relative w-full bg-gray-100 rounded-full h-4">
+                    <div class="absolute top-0 h-4 rounded-full" style="
+                        background:${sgColor(val)};
+                        width:${pct.toFixed(0)}%;
+                        ${isPos ? 'left:50%' : `right:50%`}
+                    "></div>
+                    <div class="absolute top-0 left-1/2 w-px h-4 bg-gray-400"></div>
+                </div>
+            </div>
+            <div class="w-16 text-xs font-medium text-right" style="color:${sgColor(val)}">
+                ${val >= 0 ? '+' : ''}${val.toFixed(2)}
+            </div>
+        </div>`;
+    }).join('');
+
+    // Per-hole breakdown
+    const holeMap = {};
+    sg.shots.forEach(s => {
+        if (!holeMap[s.hole]) holeMap[s.hole] = [];
+        holeMap[s.hole].push(s);
+    });
+
+    const sc = round.scorecard;
+    const parMap = Object.fromEntries(sc.hole_definitions.map(h => [h.hole_number, h]));
+
+    const holeRows = sc.hole_scores.map(hs => {
+        const shots = holeMap[hs.hole_number] || [];
+        const holeSg = shots.reduce((a, s) => a + s.sg, 0);
+        const def = parMap[hs.hole_number];
+        const par = def?.par ?? 0;
+        const diff = hs.score - par;
+        const diffStr = diff === 0 ? 'E' : (diff > 0 ? `+${diff}` : `${diff}`);
+
+        const shotCells = shots.map(s => `
+            <div class="inline-flex items-center gap-1 mr-2 mb-1">
+                <span class="text-xs text-gray-500">${s.club}</span>
+                ${sgBadge(s.sg)}
+            </div>`).join('');
+
+        return `
+        <tr class="border-b border-gray-50 hover:bg-gray-50">
+            <td class="py-2 text-sm font-medium">H${hs.hole_number}</td>
+            <td class="py-2 text-xs text-gray-500">P${par}</td>
+            <td class="py-2 text-sm">${hs.score} <span class="text-xs text-gray-400">(${diffStr})</span></td>
+            <td class="py-2 text-sm font-medium" style="color:${sgColor(holeSg)}">
+                ${holeSg >= 0 ? '+' : ''}${holeSg.toFixed(2)}
+            </td>
+            <td class="py-2">${shotCells}</td>
+        </tr>`;
+    }).join('');
+
+    // Best/worst shots
+    const sorted = [...sg.shots].sort((a, b) => b.sg - a.sg);
+    const best3 = sorted.slice(0, 3);
+    const worst3 = sorted.slice(-3).reverse();
+
+    const shotListHtml = (shots, label) => `
+        <div>
+            <div class="text-xs font-medium text-gray-500 mb-2">${label}</div>
+            ${shots.map(s => `
+                <div class="flex items-center justify-between py-1">
+                    <span class="text-xs text-gray-600">H${s.hole} S${s.shotNum} · ${s.club} · ${s.distBefore}yds</span>
+                    ${sgBadge(s.sg)}
+                </div>`).join('')}
+        </div>`;
+
+    return `
+    <div class="bg-white rounded-xl shadow-sm border p-6">
+        <h3 class="text-lg font-semibold text-gray-700 mb-1">Strokes Gained</h3>
+        <p class="text-xs text-gray-400 mb-4">Based on Mark Broadie's Every Shot Counts · 15-handicap baseline</p>
+        <div class="grid grid-cols-2 md:grid-cols-5 gap-3 mb-6">
+            ${totalCard}
+            ${catCards}
+        </div>
+        <div class="space-y-2 mb-6">${barChart}</div>
+        <div class="grid grid-cols-2 gap-6 mb-6">
+            ${shotListHtml(best3, '🏆 Best Shots')}
+            ${shotListHtml(worst3, '💀 Worst Shots')}
+        </div>
+    </div>
+    <div class="bg-white rounded-xl shadow-sm border p-6">
+        <h3 class="text-lg font-semibold text-gray-700 mb-4">Per-Hole Breakdown</h3>
+        <div class="overflow-x-auto">
+            <table class="w-full text-sm">
+                <thead><tr class="text-xs text-gray-400 border-b">
+                    <th class="text-left py-1">Hole</th>
+                    <th class="text-left py-1">Par</th>
+                    <th class="text-left py-1">Score</th>
+                    <th class="text-left py-1">SG</th>
+                    <th class="text-left py-1">Shots</th>
+                </tr></thead>
+                <tbody>${holeRows}</tbody>
+            </table>
+        </div>
+    </div>`;
+}
+
 // ── AI Prompt Builder ────────────────────────────────────────────────────────
 
 function buildAiPrompt(round) {
@@ -1455,6 +1772,24 @@ function buildAiPrompt(round) {
                 ].filter(Boolean);
                 L.push(parts.join(', '));
             });
+        });
+    }
+
+    // Strokes Gained summary
+    const sg = computeStrokesGained(round);
+    if (sg) {
+        L.push('\n## Strokes Gained (15-handicap baseline)');
+        L.push(`Total: ${sg.total >= 0 ? '+' : ''}${sg.total.toFixed(2)}`);
+        const catNames = { off_tee: 'Off the Tee', approach: 'Approach', short_game: 'Short Game', putting: 'Putting' };
+        Object.entries(catNames).forEach(([k, v]) => {
+            const val = sg.categories[k];
+            L.push(`${v}: ${val >= 0 ? '+' : ''}${val.toFixed(2)} (${sg.catCounts[k]} shots)`);
+        });
+        L.push('\nPer-shot SG:');
+        L.push('Hole | Shot | Club | Dist | SG');
+        L.push('-----|------|------|------|---');
+        sg.shots.forEach(s => {
+            L.push(`H${s.hole} | S${s.shotNum} | ${s.club} | ${s.distBefore}yds | ${s.sg >= 0 ? '+' : ''}${s.sg.toFixed(2)}`);
         });
     }
 
