@@ -5,7 +5,7 @@ const PAGE_SIZE = 10;
 const state = {
     rounds: [],
     activeId: null,
-    activeTab: 'overview',  // 'overview' | 'shotmap' | 'stats'
+    activeTab: 'overview',  // 'overview' | 'shotmap' | 'stats' | 'sg'
     searchTerm: '',
     syncOffset: 0,
     syncing: false,
@@ -177,6 +177,7 @@ function renderDetailTabs() {
         { id: 'overview', label: 'Overview' },
         { id: 'shotmap',  label: 'Shot Map' },
         { id: 'stats',    label: 'Course Stats' },
+        { id: 'sg',       label: 'Shot Analysis' },
     ];
 
     const tabBar = `
@@ -205,6 +206,8 @@ function renderDetailTabs() {
         tabContent = buildShotMap(round);
     } else if (state.activeTab === 'stats') {
         tabContent = buildCourseStats(round);
+    } else if (state.activeTab === 'sg') {
+        tabContent = buildStrokesGainedTab(round);
     }
 
     content.innerHTML = tabBar + `<div class="space-y-6 pb-6">${tabContent}</div>`;
@@ -881,6 +884,10 @@ function renderShotMap(round) {
     const holePutts = {};
     sc.hole_scores.forEach(hs => { holePutts[hs.hole_number] = hs.putts; });
 
+    // Pre-compute SG lookup for shot popups
+    const sgLookup = buildSgLookup(round);
+    const holeShotIdx = {}; // track per-hole shot index for SG key
+
     // Pre-compute hole bearing (tee→green) per hole — matches Course Stats deviation calc
     const holeBearings = {};
     sc.hole_scores.forEach(hs => {
@@ -923,6 +930,9 @@ function renderShotMap(round) {
         }
 
         // Popup content — 2-column layout
+        const shotIdxInHole = holeShotIdx[shot.hole_number] ?? 0;
+        holeShotIdx[shot.hole_number] = shotIdxInHole + 1;
+        const sgVal = sgLookup[`${shot.hole_number}-${shotIdxInHole}`];
         const spark = hr ? hrSparkline(shot, round.health_timeline) : '';
         const leftLines = [
             `<b>H${shot.hole_number} ${isPutt ? 'Putt' : `Shot ${shotNum}`}</b>`,
@@ -931,6 +941,7 @@ function renderShotMap(round) {
             isPutt ? `Putts: ${holePutts[shot.hole_number] ?? '?'}` : null,
             alt ? `Alt: ${alt}` : null,
             shot.swing_tempo != null ? `Tempo: ${shot.swing_tempo.toFixed(1)}:1` : null,
+            sgVal != null ? `SG: ${sgBadge(sgVal)}` : null,
         ].filter(Boolean).join('<br>');
         const rightParts = [dirHtml, hr ? `<div style="text-align:center;font-size:11px;color:#666">${hr}</div>${spark}` : ''].filter(Boolean).join('');
         const popupHtml = rightParts
@@ -1396,6 +1407,610 @@ function buildClubSummary(enriched) {
     </div>`;
 }
 
+// ── Strokes Gained (Broadie / Every Shot Counts) ─────────────────────────────
+
+// 15-handicap baseline: expected strokes to hole out from given distance (yards).
+// Sources: Mark Broadie "Every Shot Counts" amateur tables, interpolated.
+// Keys: distance in yards → expected strokes. We interpolate between entries.
+const SG_BASELINE_TEE = [
+    // distance, expected strokes (from tee box)
+    [100, 2.92], [125, 2.99], [150, 3.07], [175, 3.17], [200, 3.32],
+    [225, 3.45], [250, 3.58], [275, 3.71], [300, 3.84], [325, 3.97],
+    [350, 4.08], [375, 4.17], [400, 4.28], [425, 4.41], [450, 4.54],
+    [475, 4.65], [500, 4.79], [525, 4.92], [550, 5.06], [575, 5.19], [600, 5.32],
+];
+const SG_BASELINE_FAIRWAY = [
+    // distance, expected strokes (from fairway)
+    [20, 2.70], [30, 2.75], [40, 2.80], [50, 2.87], [60, 2.93],
+    [80, 3.02], [100, 3.12], [120, 3.25], [140, 3.39], [150, 3.47],
+    [160, 3.54], [175, 3.65], [200, 3.82], [225, 4.00], [250, 4.18], [275, 4.36],
+];
+const SG_BASELINE_ROUGH = [
+    // distance, expected strokes (from rough — ~0.2 penalty over fairway)
+    [20, 2.86], [30, 2.92], [40, 2.97], [50, 3.05], [60, 3.12],
+    [80, 3.22], [100, 3.33], [120, 3.47], [140, 3.62], [150, 3.70],
+    [160, 3.78], [175, 3.90], [200, 4.08], [225, 4.27], [250, 4.46],
+];
+const SG_BASELINE_GREEN = [
+    // distance in feet, expected putts
+    [1, 1.00], [2, 1.04], [3, 1.14], [4, 1.23], [5, 1.33],
+    [6, 1.42], [8, 1.56], [10, 1.67], [15, 1.82], [20, 1.93],
+    [25, 2.03], [30, 2.12], [40, 2.25], [50, 2.35], [60, 2.44], [90, 2.64],
+];
+
+function interpolateBaseline(table, dist) {
+    if (dist <= table[0][0]) return table[0][1];
+    if (dist >= table[table.length - 1][0]) return table[table.length - 1][1];
+    for (let i = 0; i < table.length - 1; i++) {
+        if (dist >= table[i][0] && dist <= table[i + 1][0]) {
+            const t = (dist - table[i][0]) / (table[i + 1][0] - table[i][0]);
+            return table[i][1] + t * (table[i + 1][1] - table[i][1]);
+        }
+    }
+    return table[table.length - 1][1];
+}
+
+// Expected strokes from a position. lie: 'tee' | 'fairway' | 'rough' | 'green'
+function expectedStrokes(distYards, lie) {
+    if (lie === 'green') return interpolateBaseline(SG_BASELINE_GREEN, distYards * 3); // yards→feet
+    if (lie === 'tee') return interpolateBaseline(SG_BASELINE_TEE, distYards);
+    if (lie === 'rough') return interpolateBaseline(SG_BASELINE_ROUGH, distYards);
+    return interpolateBaseline(SG_BASELINE_FAIRWAY, distYards);
+}
+
+// Compute strokes gained for an entire round. Returns { shots: [...], categories: {...} }
+function computeStrokesGained(round) {
+    const sc = round.scorecard;
+    if (!sc?.hole_scores?.length) return null;
+
+    const sgShots = [];
+    sc.hole_scores.forEach(hs => {
+        const holeDef = sc.hole_definitions.find(h => h.hole_number === hs.hole_number);
+        const shots = hs.shots;
+        if (!shots.length) return;
+
+        const green = shots[shots.length - 1].to; // last shot destination = hole location
+
+        shots.forEach((shot, idx) => {
+            const cat = shot.club_category ?? 'unknown';
+            const isPutt = cat === 'putt';
+            const isLastShot = idx === shots.length - 1;
+
+            // Distance from shot origin to green
+            const distBefore = metersToYards(distMeters(shot.from, green));
+            // Distance from shot destination to green
+            const distAfter = isLastShot ? 0 : metersToYards(distMeters(shot.to, green));
+
+            // Determine lie
+            let lieBefore, lieAfter;
+            if (idx === 0) {
+                lieBefore = 'tee';
+            } else if (isPutt) {
+                lieBefore = 'green';
+            } else if (distBefore < 50) {
+                lieBefore = 'fairway'; // short game — treat as fairway
+            } else {
+                // Use fairway_hit flag for 2nd shot on par 4/5 (tee shot hit fairway)
+                lieBefore = (idx === 1 && hs.fairway_hit) ? 'fairway' : 'rough';
+            }
+
+            if (isLastShot) {
+                lieAfter = 'holed';
+            } else {
+                const nextCat = shots[idx + 1]?.club_category;
+                lieAfter = nextCat === 'putt' ? 'green' : (lieBefore === 'tee' && hs.fairway_hit ? 'fairway' : 'fairway');
+            }
+
+            const expBefore = expectedStrokes(distBefore, lieBefore);
+            const expAfter = isLastShot ? 0 : expectedStrokes(distAfter, lieAfter);
+            // SG = expected_before - (1 + expected_after)
+            const sg = expBefore - 1 - expAfter;
+
+            // Categorize: off-tee, approach, short-game, putting
+            let sgCat;
+            if (isPutt) {
+                sgCat = 'putting';
+            } else if (idx === 0 && (holeDef?.par ?? 0) >= 4) {
+                sgCat = 'off_tee';
+            } else if (distBefore < 50) {
+                sgCat = 'short_game';
+            } else {
+                sgCat = 'approach';
+            }
+
+            sgShots.push({
+                hole: hs.hole_number,
+                shotIdx: idx,
+                shotNum: idx + 1,
+                club: shot.club_name ?? cat,
+                cat: sgCat,
+                distBefore: Math.round(distBefore),
+                distAfter: Math.round(distAfter),
+                lieBefore,
+                sg: +sg.toFixed(3),
+                from: shot.from,
+                to: shot.to,
+            });
+        });
+    });
+
+    // Aggregate by category
+    const cats = { off_tee: 0, approach: 0, short_game: 0, putting: 0 };
+    const catCounts = { off_tee: 0, approach: 0, short_game: 0, putting: 0 };
+    sgShots.forEach(s => {
+        if (cats[s.cat] !== undefined) {
+            cats[s.cat] += s.sg;
+            catCounts[s.cat]++;
+        }
+    });
+    const total = Object.values(cats).reduce((a, b) => a + b, 0);
+
+    return { shots: sgShots, categories: cats, catCounts, total };
+}
+
+// Build a per-shot SG lookup keyed by "hole-shotIdx" for shot map popups
+function buildSgLookup(round) {
+    const sg = computeStrokesGained(round);
+    if (!sg) return {};
+    const map = {};
+    sg.shots.forEach(s => { map[`${s.hole}-${s.shotIdx}`] = s.sg; });
+    return map;
+}
+
+function sgColor(val) {
+    if (val >= 0.3) return '#16a34a';  // strong gain
+    if (val >= 0)   return '#22c55e';  // slight gain
+    if (val >= -0.3) return '#f97316'; // slight loss
+    return '#ef4444';                  // strong loss
+}
+
+function sgBadge(val) {
+    if (val == null) return '';
+    const sign = val >= 0 ? '+' : '';
+    const c = sgColor(val);
+    return `<span style="color:${c};font-weight:600;font-size:11px">${sign}${val.toFixed(2)}</span>`;
+}
+
+function buildStrokesGainedTab(round) {
+    const sg = computeStrokesGained(round);
+    if (!sg) return `<div class="bg-white rounded-xl shadow-sm border p-6">
+        <p class="text-gray-400 text-sm">No scorecard data for Strokes Gained analysis.</p></div>`;
+
+    const catLabels = {
+        off_tee: 'Off the Tee', approach: 'Approach',
+        short_game: 'Short Game', putting: 'Putting'
+    };
+    const catIcons = {
+        off_tee: '🏌️', approach: '🎯', short_game: '⛳', putting: '🏁'
+    };
+
+    // Summary cards
+    const totalCard = `
+        <div class="bg-gray-50 rounded-lg p-4 text-center col-span-2 md:col-span-1">
+            <div class="text-2xl font-bold" style="color:${sgColor(sg.total)}">
+                ${sg.total >= 0 ? '+' : ''}${sg.total.toFixed(1)}
+            </div>
+            <div class="text-xs text-gray-500 mt-1">Total SG</div>
+        </div>`;
+
+    const catCards = Object.entries(catLabels).map(([key, label]) => {
+        const val = sg.categories[key];
+        const count = sg.catCounts[key];
+        return `
+        <div class="bg-gray-50 rounded-lg p-4 text-center">
+            <div class="text-lg font-bold" style="color:${sgColor(val)}">
+                ${val >= 0 ? '+' : ''}${val.toFixed(2)}
+            </div>
+            <div class="text-xs text-gray-500 mt-1">${catIcons[key]} ${label}</div>
+            <div class="text-xs text-gray-400">${count} shots</div>
+        </div>`;
+    }).join('');
+
+    // Category bar chart
+    const maxAbs = Math.max(0.5, ...Object.values(sg.categories).map(Math.abs));
+    const barChart = Object.entries(catLabels).map(([key, label]) => {
+        const val = sg.categories[key];
+        const pct = Math.abs(val) / maxAbs * 50;
+        const isPos = val >= 0;
+        return `
+        <div class="flex items-center gap-3">
+            <div class="w-24 text-xs text-gray-600 text-right">${label}</div>
+            <div class="flex-1 flex items-center" style="height:24px">
+                <div class="relative w-full bg-gray-100 rounded-full h-4">
+                    <div class="absolute top-0 h-4 rounded-full" style="
+                        background:${sgColor(val)};
+                        width:${pct.toFixed(0)}%;
+                        ${isPos ? 'left:50%' : `right:50%`}
+                    "></div>
+                    <div class="absolute top-0 left-1/2 w-px h-4 bg-gray-400"></div>
+                </div>
+            </div>
+            <div class="w-16 text-xs font-medium text-right" style="color:${sgColor(val)}">
+                ${val >= 0 ? '+' : ''}${val.toFixed(2)}
+            </div>
+        </div>`;
+    }).join('');
+
+    // Per-hole breakdown
+    const holeMap = {};
+    sg.shots.forEach(s => {
+        if (!holeMap[s.hole]) holeMap[s.hole] = [];
+        holeMap[s.hole].push(s);
+    });
+
+    const sc = round.scorecard;
+    const parMap = Object.fromEntries(sc.hole_definitions.map(h => [h.hole_number, h]));
+
+    const holeRows = sc.hole_scores.map(hs => {
+        const shots = holeMap[hs.hole_number] || [];
+        const holeSg = shots.reduce((a, s) => a + s.sg, 0);
+        const def = parMap[hs.hole_number];
+        const par = def?.par ?? 0;
+        const diff = hs.score - par;
+        const diffStr = diff === 0 ? 'E' : (diff > 0 ? `+${diff}` : `${diff}`);
+
+        const shotCells = shots.map(s => `
+            <div class="inline-flex items-center gap-1 mr-2 mb-1">
+                <span class="text-xs text-gray-500">${s.club}</span>
+                ${sgBadge(s.sg)}
+            </div>`).join('');
+
+        return `
+        <tr class="border-b border-gray-50 hover:bg-gray-50">
+            <td class="py-2 text-sm font-medium">H${hs.hole_number}</td>
+            <td class="py-2 text-xs text-gray-500">P${par}</td>
+            <td class="py-2 text-sm">${hs.score} <span class="text-xs text-gray-400">(${diffStr})</span></td>
+            <td class="py-2 text-sm font-medium" style="color:${sgColor(holeSg)}">
+                ${holeSg >= 0 ? '+' : ''}${holeSg.toFixed(2)}
+            </td>
+            <td class="py-2">${shotCells}</td>
+        </tr>`;
+    }).join('');
+
+    // Best/worst shots
+    const sorted = [...sg.shots].sort((a, b) => b.sg - a.sg);
+    const best3 = sorted.slice(0, 3);
+    const worst3 = sorted.slice(-3).reverse();
+
+    const shotListHtml = (shots, label) => `
+        <div>
+            <div class="text-xs font-medium text-gray-500 mb-2">${label}</div>
+            ${shots.map(s => `
+                <div class="flex items-center justify-between py-1">
+                    <span class="text-xs text-gray-600">H${s.hole} S${s.shotNum} · ${s.club} · ${s.distBefore}yds</span>
+                    ${sgBadge(s.sg)}
+                </div>`).join('')}
+        </div>`;
+
+    // Club analysis: merge SG shots with direction data
+    const clubAnalysis = buildClubAnalysis(round, sg);
+    const dispersion = buildDispersionHeatmaps(round, sg);
+
+    return `
+    <div class="bg-white rounded-xl shadow-sm border p-6">
+        <h3 class="text-lg font-semibold text-gray-700 mb-1">Strokes Gained</h3>
+        <p class="text-xs text-gray-400 mb-4">Based on Mark Broadie's Every Shot Counts · 15-handicap baseline</p>
+        <div class="grid grid-cols-2 md:grid-cols-5 gap-3 mb-6">
+            ${totalCard}
+            ${catCards}
+        </div>
+        <div class="space-y-2 mb-6">${barChart}</div>
+        <div class="grid grid-cols-2 gap-6 mb-6">
+            ${shotListHtml(best3, '🏆 Best Shots')}
+            ${shotListHtml(worst3, '💀 Worst Shots')}
+        </div>
+    </div>
+    ${clubAnalysis}
+    ${dispersion}
+    <div class="bg-white rounded-xl shadow-sm border p-6">
+        <h3 class="text-lg font-semibold text-gray-700 mb-4">Per-Hole Breakdown</h3>
+        <div class="overflow-x-auto">
+            <table class="w-full text-sm">
+                <thead><tr class="text-xs text-gray-400 border-b">
+                    <th class="text-left py-1">Hole</th>
+                    <th class="text-left py-1">Par</th>
+                    <th class="text-left py-1">Score</th>
+                    <th class="text-left py-1">SG</th>
+                    <th class="text-left py-1">Shots</th>
+                </tr></thead>
+                <tbody>${holeRows}</tbody>
+            </table>
+        </div>
+    </div>
+    <div class="bg-gray-50 rounded-xl border border-gray-200 p-6 text-sm text-gray-500 leading-relaxed">
+        <h4 class="font-semibold text-gray-600 mb-2">How Strokes Gained Works</h4>
+        <p class="mb-2">Strokes Gained, developed by Mark Broadie in <i>Every Shot Counts</i>, measures each shot's value by comparing your result to what a benchmark golfer (here, a 15-handicap) would expect from the same position.</p>
+        <p class="mb-2"><b>SG = Expected strokes before − 1 − Expected strokes after.</b> A positive value means you gained strokes (did better than baseline); negative means you lost strokes.</p>
+        <div class="grid grid-cols-2 gap-x-6 gap-y-1 mt-3 text-xs">
+            <div><span class="font-medium text-gray-600">SG: Off the Tee</span> — Tee shots on par 4s and 5s</div>
+            <div><span class="font-medium text-gray-600">SG: Approach</span> — Shots into the green from 50+ yards</div>
+            <div><span class="font-medium text-gray-600">SG: Short Game</span> — Non-putt shots within 50 yards</div>
+            <div><span class="font-medium text-gray-600">SG: Putting</span> — All putts on the green</div>
+        </div>
+        <p class="mt-3 text-xs text-gray-400">Lie detection is approximate — fairway/rough is inferred from the fairway-hit flag on tee shots. Baseline data is interpolated from Broadie's published 15-handicap amateur tables.</p>
+    </div>`;
+}
+
+function buildClubAnalysis(round, sg) {
+    const sc = round.scorecard;
+    if (!sc?.hole_scores?.length) return '';
+
+    // Build direction data per shot keyed by hole-shotIdx
+    const dirMap = {};
+    sc.hole_scores.forEach(hs => {
+        const shots = hs.shots;
+        if (!shots.length) return;
+        const holeBear = bearing(shots[0].from, shots[shots.length - 1].to);
+        shots.forEach((shot, idx) => {
+            const cat = shot.club_category ?? 'unknown';
+            if (cat === 'putt') return;
+            const dist = metersToYards(distMeters(shot.from, shot.to));
+            const shotBear = bearing(shot.from, shot.to);
+            const dev = deviation(shotBear, holeBear);
+            dirMap[`${hs.hole_number}-${idx}`] = { dev, dist };
+        });
+    });
+
+    // Group by club
+    const byClub = {};
+    sg.shots.forEach(s => {
+        if (s.cat === 'putting') return;
+        if (!byClub[s.club]) byClub[s.club] = [];
+        const dir = dirMap[`${s.hole}-${s.shotIdx}`];
+        byClub[s.club].push({ ...s, dev: dir?.dev ?? 0, distYds: dir?.dist ?? s.distBefore });
+    });
+
+    const stdDev = (arr) => {
+        if (arr.length < 2) return 0;
+        const mean = arr.reduce((a, b) => a + b, 0) / arr.length;
+        return Math.sqrt(arr.reduce((a, v) => a + (v - mean) ** 2, 0) / (arr.length - 1));
+    };
+
+    const clubs = Object.entries(byClub)
+        .filter(([, shots]) => shots.length >= 2)
+        .map(([name, shots]) => {
+            const dists = shots.map(s => s.distYds);
+            const devs = shots.map(s => s.dev);
+            const sgs = shots.map(s => s.sg);
+            const avgDist = dists.reduce((a, b) => a + b, 0) / dists.length;
+            const distStd = stdDev(dists);
+            const avgDev = devs.reduce((a, b) => a + b, 0) / devs.length;
+            const devStd = stdDev(devs);
+            const avgSg = sgs.reduce((a, b) => a + b, 0) / sgs.length;
+            const left = shots.filter(s => s.dev <= -15).length;
+            const right = shots.filter(s => s.dev >= 15).length;
+            const straight = shots.length - left - right;
+
+            let tendency;
+            if (Math.abs(avgDev) < 5) tendency = { label: 'Neutral', color: '#22c55e' };
+            else if (avgDev < -5) tendency = { label: `Left bias (${Math.round(avgDev)}°)`, color: '#3b82f6' };
+            else tendency = { label: `Right bias (+${Math.round(avgDev)}°)`, color: '#f97316' };
+
+            // Consistency rating based on distance CV (coefficient of variation)
+            const cv = avgDist > 0 ? distStd / avgDist : 0;
+            let consistency;
+            if (cv < 0.05) consistency = { label: 'Very consistent', color: '#16a34a', stars: '★★★' };
+            else if (cv < 0.10) consistency = { label: 'Consistent', color: '#22c55e', stars: '★★☆' };
+            else if (cv < 0.18) consistency = { label: 'Moderate', color: '#eab308', stars: '★☆☆' };
+            else consistency = { label: 'Inconsistent', color: '#ef4444', stars: '☆☆☆' };
+
+            return { name, shots: shots.length, avgDist, distStd, avgDev, devStd, avgSg, left, right, straight, tendency, consistency };
+        })
+        .sort((a, b) => b.avgDist - a.avgDist);
+
+    if (!clubs.length) return '';
+
+    const rows = clubs.map(c => {
+        const total = c.shots;
+        const lPct = (c.left / total * 100).toFixed(0);
+        const sPct = (c.straight / total * 100).toFixed(0);
+        const rPct = (c.right / total * 100).toFixed(0);
+        // Mini direction bar
+        const dirBar = `<div class="flex h-3 rounded-full overflow-hidden" style="width:80px">
+            <div class="bg-blue-400" style="width:${lPct}%"></div>
+            <div class="bg-green-400" style="width:${sPct}%"></div>
+            <div class="bg-orange-400" style="width:${rPct}%"></div>
+        </div>`;
+
+        return `
+        <tr class="border-b border-gray-50 hover:bg-gray-50">
+            <td class="py-2.5 text-sm font-medium">${c.name}</td>
+            <td class="py-2.5 text-xs text-gray-400 text-center">${c.shots}</td>
+            <td class="py-2.5 text-sm">${Math.round(c.avgDist)} <span class="text-xs text-gray-400">±${Math.round(c.distStd)}</span></td>
+            <td class="py-2.5"><span style="color:${c.consistency.color}" class="text-xs font-medium">${c.consistency.stars} ${c.consistency.label}</span></td>
+            <td class="py-2.5">
+                <div class="flex items-center gap-2">
+                    ${dirBar}
+                    <span class="text-xs" style="color:${c.tendency.color}">${c.tendency.label}</span>
+                </div>
+            </td>
+            <td class="py-2.5 text-sm font-medium" style="color:${sgColor(c.avgSg)}">
+                ${c.avgSg >= 0 ? '+' : ''}${c.avgSg.toFixed(2)}
+            </td>
+        </tr>`;
+    }).join('');
+
+    return `
+    <div class="bg-white rounded-xl shadow-sm border p-6">
+        <h3 class="text-lg font-semibold text-gray-700 mb-1">Club Analysis</h3>
+        <p class="text-xs text-gray-400 mb-4">Mis-shot tendency and consistency per club (min 2 shots)</p>
+        <div class="overflow-x-auto">
+            <table class="w-full text-sm">
+                <thead><tr class="text-xs text-gray-400 border-b">
+                    <th class="text-left py-1">Club</th>
+                    <th class="text-center py-1">Shots</th>
+                    <th class="text-left py-1">Avg Dist</th>
+                    <th class="text-left py-1">Consistency</th>
+                    <th class="text-left py-1">Tendency</th>
+                    <th class="text-left py-1">Avg SG</th>
+                </tr></thead>
+                <tbody>${rows}</tbody>
+            </table>
+        </div>
+    </div>`;
+}
+
+function buildDispersionHeatmaps(round, sg) {
+    const sc = round.scorecard;
+    if (!sc?.hole_scores?.length) return '';
+
+    // Build enriched shot data with direction deviation and distance accuracy
+    const shots = [];
+    sc.hole_scores.forEach(hs => {
+        const holeShots = hs.shots;
+        if (!holeShots.length) return;
+        const green = holeShots[holeShots.length - 1].to;
+        const holeBear = bearing(holeShots[0].from, green);
+
+        holeShots.forEach((shot, idx) => {
+            const cat = shot.club_category ?? 'unknown';
+            if (cat === 'putt') return;
+
+            const distToGreenBefore = metersToYards(distMeters(shot.from, green));
+            const distToGreenAfter = metersToYards(distMeters(shot.to, green));
+            const shotDist = metersToYards(distMeters(shot.from, shot.to));
+            const shotBear = bearing(shot.from, shot.to);
+            const dev = deviation(shotBear, holeBear);
+
+            // Distance accuracy: how far short/long of ideal
+            // Ideal = land exactly on the line to green, covering distToGreenBefore yards
+            // Positive = long, negative = short
+            const idealDist = distToGreenBefore;
+            const distDelta = shotDist - idealDist; // positive = long of target
+            const distPct = idealDist > 0 ? (distDelta / idealDist) * 100 : 0;
+
+            // Find matching SG
+            const sgShot = sg.shots.find(s => s.hole === hs.hole_number && s.shotIdx === idx);
+
+            shots.push({
+                hole: hs.hole_number,
+                club: shot.club_name ?? cat,
+                cat,
+                distToGreen: Math.round(distToGreenBefore),
+                shotDist: Math.round(shotDist),
+                dev,        // direction deviation in degrees
+                distDelta,  // yards long(+) or short(-)
+                distPct,    // % long/short
+                sg: sgShot?.sg ?? 0,
+            });
+        });
+    });
+
+    if (!shots.length) return '';
+
+    // Distance buckets
+    const buckets = [
+        { label: '0–50 yds',    min: 0,   max: 50 },
+        { label: '51–100 yds',  min: 51,  max: 100 },
+        { label: '101–150 yds', min: 101, max: 150 },
+        { label: '151–200 yds', min: 151, max: 200 },
+        { label: '200+ yds',    min: 201, max: 999 },
+    ];
+
+    // Direction bins and distance-result bins
+    const dirBins = [
+        { label: 'Far L',    min: -Infinity, max: -30 },
+        { label: 'Left',     min: -30,       max: -10 },
+        { label: 'Straight', min: -10,       max: 10 },
+        { label: 'Right',    min: 10,        max: 30 },
+        { label: 'Far R',    min: 30,        max: Infinity },
+    ];
+    const distBins = [
+        { label: 'Way Long',  min: 15,        max: Infinity },
+        { label: 'Long',      min: 5,         max: 15 },
+        { label: 'Good',      min: -5,         max: 5 },
+        { label: 'Short',     min: -15,        max: -5 },
+        { label: 'Way Short', min: -Infinity,  max: -15 },
+    ];
+
+    function classify(val, bins) {
+        for (const b of bins) {
+            if (val >= b.min && val < b.max) return b.label;
+        }
+        return bins[bins.length - 1].label;
+    }
+
+    // Build heatmaps per bucket
+    const heatmaps = buckets.map(bucket => {
+        const bucketShots = shots.filter(s => s.distToGreen >= bucket.min && s.distToGreen <= bucket.max);
+        if (bucketShots.length < 2) return null;
+
+        // Build grid: distBin rows × dirBin cols
+        const grid = {};
+        distBins.forEach(db => {
+            grid[db.label] = {};
+            dirBins.forEach(dirB => {
+                grid[db.label][dirB.label] = { count: 0, sgSum: 0 };
+            });
+        });
+
+        bucketShots.forEach(s => {
+            const dirLabel = classify(s.dev, dirBins);
+            const distLabel = classify(s.distPct, distBins);
+            grid[distLabel][dirLabel].count++;
+            grid[distLabel][dirLabel].sgSum += s.sg;
+        });
+
+        const maxCount = Math.max(1, ...Object.values(grid).flatMap(row =>
+            Object.values(row).map(c => c.count)
+        ));
+
+        // Render grid as HTML table
+        const headerCells = dirBins.map(d =>
+            `<th class="px-1 py-1 text-center" style="min-width:52px">${d.label}</th>`
+        ).join('');
+
+        const bodyRows = distBins.map(db => {
+            const cells = dirBins.map(dirB => {
+                const cell = grid[db.label][dirB.label];
+                if (cell.count === 0) return `<td class="px-1 py-1 text-center"><span class="text-gray-200">·</span></td>`;
+                const avgSg = cell.sgSum / cell.count;
+                const intensity = cell.count / maxCount;
+                // Blue intensity for count, text color for SG
+                const bg = `rgba(59,130,246,${(0.08 + intensity * 0.5).toFixed(2)})`;
+                const isGood = db.label === 'Good' && dirB.label === 'Straight';
+                return `<td class="px-1 py-1 text-center" style="background:${bg};border-radius:4px">
+                    <div class="text-sm font-bold" style="color:${sgColor(avgSg)}">${cell.count}</div>
+                    <div class="text-xs" style="color:${sgColor(avgSg)}">${avgSg >= 0 ? '+' : ''}${avgSg.toFixed(1)}</div>
+                </td>`;
+            }).join('');
+            return `<tr><td class="px-2 py-1 text-xs text-gray-500 text-right font-medium whitespace-nowrap">${db.label}</td>${cells}</tr>`;
+        }).join('');
+
+        const avgSgBucket = bucketShots.reduce((a, s) => a + s.sg, 0) / bucketShots.length;
+
+        return `
+        <div>
+            <div class="flex items-center gap-2 mb-2">
+                <span class="text-sm font-medium text-gray-700">${bucket.label}</span>
+                <span class="text-xs text-gray-400">${bucketShots.length} shots</span>
+                <span class="text-xs font-medium" style="color:${sgColor(avgSgBucket)}">avg SG ${avgSgBucket >= 0 ? '+' : ''}${avgSgBucket.toFixed(2)}</span>
+            </div>
+            <table class="text-xs">
+                <thead><tr><th></th>${headerCells}</tr></thead>
+                <tbody>${bodyRows}</tbody>
+            </table>
+        </div>`;
+    }).filter(Boolean);
+
+    if (!heatmaps.length) return '';
+
+    return `
+    <div class="bg-white rounded-xl shadow-sm border p-6">
+        <h3 class="text-lg font-semibold text-gray-700 mb-1">Shot Dispersion</h3>
+        <p class="text-xs text-gray-400 mb-4">Where your shots land relative to target — count and avg SG per cell. Grouped by distance to green.</p>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+            ${heatmaps.join('')}
+        </div>
+        <div class="mt-4 flex items-center gap-4 text-xs text-gray-400">
+            <span>Cell = shot count + avg SG</span>
+            <span>Blue intensity = frequency</span>
+            <span style="color:#22c55e">● Gained</span>
+            <span style="color:#ef4444">● Lost</span>
+        </div>
+    </div>`;
+}
+
 // ── AI Prompt Builder ────────────────────────────────────────────────────────
 
 function buildAiPrompt(round) {
@@ -1456,6 +2071,118 @@ function buildAiPrompt(round) {
                 L.push(parts.join(', '));
             });
         });
+    }
+
+    // Strokes Gained summary
+    const sg = computeStrokesGained(round);
+    if (sg) {
+        L.push('\n## Strokes Gained (15-handicap baseline)');
+        L.push(`Total: ${sg.total >= 0 ? '+' : ''}${sg.total.toFixed(2)}`);
+        const catNames = { off_tee: 'Off the Tee', approach: 'Approach', short_game: 'Short Game', putting: 'Putting' };
+        Object.entries(catNames).forEach(([k, v]) => {
+            const val = sg.categories[k];
+            L.push(`${v}: ${val >= 0 ? '+' : ''}${val.toFixed(2)} (${sg.catCounts[k]} shots)`);
+        });
+        L.push('\nPer-shot SG:');
+        L.push('Hole | Shot | Club | Dist | SG');
+        L.push('-----|------|------|------|---');
+        sg.shots.forEach(s => {
+            L.push(`H${s.hole} | S${s.shotNum} | ${s.club} | ${s.distBefore}yds | ${s.sg >= 0 ? '+' : ''}${s.sg.toFixed(2)}`);
+        });
+
+        // Club analysis: tendency and consistency
+        const sc = round.scorecard;
+        if (sc?.hole_scores?.length) {
+            const dirMap = {};
+            sc.hole_scores.forEach(hs => {
+                const shots = hs.shots;
+                if (!shots.length) return;
+                const holeBear = bearing(shots[0].from, shots[shots.length - 1].to);
+                shots.forEach((shot, idx) => {
+                    if ((shot.club_category ?? '') === 'putt') return;
+                    const dev = deviation(bearing(shot.from, shot.to), holeBear);
+                    const dist = metersToYards(distMeters(shot.from, shot.to));
+                    dirMap[`${hs.hole_number}-${idx}`] = { dev, dist };
+                });
+            });
+
+            const byClub = {};
+            sg.shots.filter(s => s.cat !== 'putting').forEach(s => {
+                if (!byClub[s.club]) byClub[s.club] = [];
+                const dir = dirMap[`${s.hole}-${s.shotIdx}`];
+                byClub[s.club].push({ ...s, dev: dir?.dev ?? 0, distYds: dir?.dist ?? s.distBefore });
+            });
+
+            const clubEntries = Object.entries(byClub).filter(([, arr]) => arr.length >= 2);
+            if (clubEntries.length) {
+                L.push('\n## Club Analysis (Tendency & Consistency)');
+                L.push('Club | Shots | Avg Dist | Std Dev | Avg Deviation | Left% | Straight% | Right% | Avg SG');
+                L.push('-----|-------|---------|---------|---------------|-------|-----------|--------|------');
+                clubEntries.sort((a, b) => {
+                    const avgA = a[1].reduce((s, x) => s + x.distYds, 0) / a[1].length;
+                    const avgB = b[1].reduce((s, x) => s + x.distYds, 0) / b[1].length;
+                    return avgB - avgA;
+                }).forEach(([name, arr]) => {
+                    const dists = arr.map(s => s.distYds);
+                    const devs = arr.map(s => s.dev);
+                    const avgDist = Math.round(dists.reduce((a, b) => a + b, 0) / dists.length);
+                    const mean = dists.reduce((a, b) => a + b, 0) / dists.length;
+                    const std = Math.round(Math.sqrt(dists.reduce((a, v) => a + (v - mean) ** 2, 0) / (dists.length - 1)));
+                    const avgDev = Math.round(devs.reduce((a, b) => a + b, 0) / devs.length);
+                    const left = Math.round(arr.filter(s => s.dev <= -15).length / arr.length * 100);
+                    const right = Math.round(arr.filter(s => s.dev >= 15).length / arr.length * 100);
+                    const straight = 100 - left - right;
+                    const avgSg = (arr.reduce((a, s) => a + s.sg, 0) / arr.length);
+                    L.push(`${name} | ${arr.length} | ${avgDist}yds | ±${std} | ${avgDev >= 0 ? '+' : ''}${avgDev}° | ${left}% | ${straight}% | ${right}% | ${avgSg >= 0 ? '+' : ''}${avgSg.toFixed(2)}`);
+                });
+            }
+
+            // Shot dispersion by distance bucket
+            const allDispShots = [];
+            sc.hole_scores.forEach(hs => {
+                const shots = hs.shots;
+                if (!shots.length) return;
+                const green = shots[shots.length - 1].to;
+                const holeBear = bearing(shots[0].from, green);
+                shots.forEach((shot, idx) => {
+                    if ((shot.club_category ?? '') === 'putt') return;
+                    const distToGreen = metersToYards(distMeters(shot.from, green));
+                    const shotDist = metersToYards(distMeters(shot.from, shot.to));
+                    const dev = deviation(bearing(shot.from, shot.to), holeBear);
+                    const distPct = distToGreen > 0 ? ((shotDist - distToGreen) / distToGreen) * 100 : 0;
+                    const sgShot = sg.shots.find(s => s.hole === hs.hole_number && s.shotIdx === idx);
+                    allDispShots.push({ distToGreen: Math.round(distToGreen), dev, distPct, sg: sgShot?.sg ?? 0 });
+                });
+            });
+
+            const buckets = [
+                { label: '0-50 yds', min: 0, max: 50 },
+                { label: '51-100 yds', min: 51, max: 100 },
+                { label: '101-150 yds', min: 101, max: 150 },
+                { label: '151-200 yds', min: 151, max: 200 },
+                { label: '200+ yds', min: 201, max: 999 },
+            ];
+
+            const dispBuckets = buckets.map(b => ({
+                ...b, shots: allDispShots.filter(s => s.distToGreen >= b.min && s.distToGreen <= b.max)
+            })).filter(b => b.shots.length >= 2);
+
+            if (dispBuckets.length) {
+                L.push('\n## Shot Dispersion Patterns');
+                dispBuckets.forEach(b => {
+                    const avgSg = (b.shots.reduce((a, s) => a + s.sg, 0) / b.shots.length);
+                    const avgDev = Math.round(b.shots.reduce((a, s) => a + s.dev, 0) / b.shots.length);
+                    const avgDistPct = (b.shots.reduce((a, s) => a + s.distPct, 0) / b.shots.length).toFixed(1);
+                    const left = b.shots.filter(s => s.dev <= -10).length;
+                    const right = b.shots.filter(s => s.dev >= 10).length;
+                    const short = b.shots.filter(s => s.distPct < -5).length;
+                    const long = b.shots.filter(s => s.distPct > 5).length;
+                    L.push(`\n${b.label} (${b.shots.length} shots, avg SG ${avgSg >= 0 ? '+' : ''}${avgSg.toFixed(2)}):`);
+                    L.push(`  Direction: avg ${avgDev >= 0 ? '+' : ''}${avgDev}° | ${left} left, ${b.shots.length - left - right} straight, ${right} right`);
+                    L.push(`  Distance: avg ${avgDistPct}% of target | ${short} short, ${b.shots.length - short - long} good, ${long} long`);
+                });
+            }
+        }
     }
 
     // Health summary + full timeline

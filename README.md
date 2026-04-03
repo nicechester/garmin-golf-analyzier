@@ -24,7 +24,8 @@ Interactive Leaflet map showing every shot as a colored line and dot, color-code
 - Club abbreviation labels (`Dr`, `W3`, `I7`, `PW`, `H` etc.) next to each shot dot
 - Distance in yards on each shot line
 - Putt count shown inline next to each hole number marker
-- Hover popups on shots, labels, and hole markers showing club, distance, HR, altitude, and swing tempo
+- 2-column hover popups showing club, distance, HR sparkline, altitude, swing tempo, direction arrow (traffic-signal style), and strokes gained
+- GPS trail toggle to show walking path
 - Scroll/double-click zoom disabled — use `+`/`−` buttons only
 - Round Timeline chart below the map showing HR, altitude, stress, and swing tempo over time with hole markers
 
@@ -37,11 +38,23 @@ Breakdown of tee shots, approach shots, wedges, and putting with direction analy
 ![Course Stats](images/coursestats1.png)
 ![Course Stats — club summary](images/coursestats2.png)
 
+### Shot Analysis Tab
+Strokes Gained analysis based on Mark Broadie's *Every Shot Counts* methodology using a 15-handicap amateur baseline. Features:
+- Summary cards: total SG and per-category (Off the Tee, Approach, Short Game, Putting)
+- Horizontal bar chart showing gain/loss by category
+- Best and worst 3 shots highlight
+- Club analysis table with mis-shot tendency (direction bias), distance consistency rating (★★★ to ☆☆☆), and avg SG per club
+- Shot dispersion heatmaps grouped by distance-to-green bucket (0–50, 51–100, 101–150, 151–200, 200+ yds) showing a 5×5 direction × distance grid with shot count and avg SG per cell
+- Per-hole breakdown table with per-shot SG badges
+
+![Shot Analysis — strokes gained](images/shotanalysis1.png)
+![Shot Analysis — dispersion](images/shotanalysis2.png)
+
 ### Swing Tempo
 Swing tempo is captured from mesg #104 in the activity FIT file as a 5-minute rolling average. The ratio (backswing:downswing) is displayed in the round header, on the timeline chart as green dots, and in individual shot popups when available.
 
 ### Ask AI
-The ✨ Ask AI button builds a comprehensive markdown prompt from all round data — scorecard, shot details, swing tempo, and a full 1-minute health timeline (HR, altitude, stress, tempo) — and copies it to the clipboard ready to paste into [Gemini](https://gemini.google.com) or [ChatGPT](https://chatgpt.com).
+The ✨ Ask AI button builds a comprehensive markdown prompt from all round data — scorecard, shot details, strokes gained, club analysis, shot dispersion patterns, swing tempo, and a full 1-minute health timeline (HR, altitude, stress, tempo) — and copies it to the clipboard ready to paste into [Gemini](https://gemini.google.com) or [ChatGPT](https://chatgpt.com).
 
 ![Ask AI](images/ask-ai.png)
 

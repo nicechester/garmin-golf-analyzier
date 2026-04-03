@@ -6,6 +6,9 @@ export default defineConfig({
     port: 9002,
     strictPort: true,
     host: 'localhost',
+    fs: {
+      allow: ['..'],
+    },
   },
   build: {
     outDir: '../dist',
