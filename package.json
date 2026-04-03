@@ -1,6 +1,6 @@
 {
   "name": "garmin-analyzer",
-  "version": "0.1.6",
+  "version": "0.2.0",
   "description": "Garmin golf round analyzer with scorecard and health data",
   "type": "module",
   "scripts": {
