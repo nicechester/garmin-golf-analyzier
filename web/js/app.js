@@ -177,7 +177,7 @@ function renderDetailTabs() {
         { id: 'overview', label: 'Overview' },
         { id: 'shotmap',  label: 'Shot Map' },
         { id: 'stats',    label: 'Course Stats' },
-        { id: 'sg',       label: 'Strokes Gained' },
+        { id: 'sg',       label: 'Shot Analysis' },
     ];
 
     const tabBar = `
