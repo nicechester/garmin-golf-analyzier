@@ -770,6 +770,33 @@ function hrSparkline(shot, healthTimeline) {
     </svg>`;
 }
 
+// Direction arrow SVG — traffic-signal style (left / straight / right)
+function dirArrowSvg(dev) {
+    const abs = Math.abs(dev);
+    let arrow, label, bg;
+    if (abs < 15) {
+        arrow = `<polygon points="20,6 28,22 12,22" fill="white"/>`; // up arrow
+        label = 'Straight';
+        bg = '#22c55e'; // green
+    } else {
+        const isFar = abs > 30;
+        bg = isFar ? '#ef4444' : '#eab308'; // red or yellow
+        label = (dev > 0 ? (isFar ? 'Far R' : 'Right') : (isFar ? 'Far L' : 'Left'));
+        if (dev > 0) {
+            arrow = `<polygon points="28,14 14,6 14,22" fill="white"/>`; // right arrow
+        } else {
+            arrow = `<polygon points="12,14 26,6 26,22" fill="white"/>`; // left arrow
+        }
+    }
+    return `<div style="text-align:center">
+        <svg width="40" height="28" style="display:block;margin:0 auto">
+            <rect width="40" height="28" rx="6" fill="${bg}"/>
+            ${arrow}
+        </svg>
+        <div style="font-size:9px;color:#666;margin-top:2px">${label}</div>
+    </div>`;
+}
+
 const CLUB_COLORS = {
     tee:          '#ef4444',  // red
     fairway_wood: '#f97316',  // orange
@@ -848,6 +875,15 @@ function renderShotMap(round) {
     const holePutts = {};
     sc.hole_scores.forEach(hs => { holePutts[hs.hole_number] = hs.putts; });
 
+    // Pre-compute hole bearings (tee→green direction) for deviation calc
+    const holeBearings = {};
+    sc.hole_scores.forEach(hs => {
+        if (!hs.shots.length) return;
+        const first = hs.shots[0].from;
+        const last  = hs.shots[hs.shots.length - 1].to;
+        holeBearings[hs.hole_number] = bearing(first, last);
+    });
+
     allShots.forEach((shot, idx) => {
         const layer = holeLayers[shot.hole_number];
         if (!layer) return;
@@ -875,20 +911,33 @@ function renderShotMap(round) {
             fillColor: color, fillOpacity: 1,
         }).addTo(layer);
 
-        // Popup content — putts show hole putt count
-        const puttsLine = isPutt ? `Putts this hole: ${holePutts[shot.hole_number] ?? '?'}` : null;
+        // Direction arrow for non-putt shots
+        let dirHtml = '';
+        if (!isPutt && holeBearings[shot.hole_number] != null) {
+            const shotBear = bearing(shot.from, shot.to);
+            const dev = deviation(shotBear, holeBearings[shot.hole_number]);
+            dirHtml = dirArrowSvg(dev);
+        }
+
+        // Popup content — 2-column layout
         const spark = hr ? hrSparkline(shot, round.health_timeline) : '';
-        const popupLines = [
+        const leftLines = [
             `<b>H${shot.hole_number} ${isPutt ? 'Putt' : `Shot ${shotNum}`}</b>`,
             `Club: ${club}`,
-            dist      ? `Distance: ${dist}` : null,
-            puttsLine,
-            hr        ? `HR: ${hr}${spark}` : null,
-            alt       ? `Alt: ${alt}` : null,
+            dist ? `Dist: ${dist}` : null,
+            isPutt ? `Putts: ${holePutts[shot.hole_number] ?? '?'}` : null,
+            alt ? `Alt: ${alt}` : null,
             shot.swing_tempo != null ? `Tempo: ${shot.swing_tempo.toFixed(1)}:1` : null,
         ].filter(Boolean).join('<br>');
+        const rightParts = [dirHtml, hr ? `<div style="text-align:center;font-size:11px;color:#666">${hr}</div>${spark}` : ''].filter(Boolean).join('');
+        const popupHtml = rightParts
+            ? `<div style="display:flex;gap:10px;align-items:flex-start">
+                <div style="flex:1;font-size:12px;line-height:1.6">${leftLines}</div>
+                <div style="display:flex;flex-direction:column;align-items:center;min-width:60px">${rightParts}</div>
+               </div>`
+            : `<div style="font-size:12px;line-height:1.6">${leftLines}</div>`;
 
-        const popup = L.popup({ closeButton: false, offset: [0, -4], autoPan: false }).setContent(popupLines);
+        const popup = L.popup({ closeButton: false, offset: [0, -4], autoPan: false, maxWidth: 300 }).setContent(popupHtml);
         circle.bindPopup(popup);
         line.bindPopup(popup);
 
