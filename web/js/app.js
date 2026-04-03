@@ -1610,7 +1610,7 @@ function buildStrokesGainedTab(round) {
     const maxAbs = Math.max(0.5, ...Object.values(sg.categories).map(Math.abs));
     const barChart = Object.entries(catLabels).map(([key, label]) => {
         const val = sg.categories[key];
-        const pct = Math.abs(val) / maxAbs * 100;
+        const pct = Math.abs(val) / maxAbs * 50;
         const isPos = val >= 0;
         return `
         <div class="flex items-center gap-3">
