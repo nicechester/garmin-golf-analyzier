@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { buildAnalyticsContext, buildInsightsCard, buildInsightsText } from './nlg-engine.js';
 
 const PAGE_SIZE = 10;
 
@@ -1576,6 +1577,43 @@ function buildStrokesGainedTab(round) {
     if (!sg) return `<div class="bg-white rounded-xl shadow-sm border p-6">
         <p class="text-gray-400 text-sm">No scorecard data for Strokes Gained analysis.</p></div>`;
 
+    // Build club stats for NLG context (reuse buildClubAnalysis logic inline)
+    const _clubStats = (() => {
+        const sc = round.scorecard;
+        if (!sc?.hole_scores?.length) return [];
+        const dirMap = {};
+        sc.hole_scores.forEach(hs => {
+            const shots = hs.shots;
+            if (!shots.length) return;
+            const holeBear = bearing(shots[0].from, shots[shots.length - 1].to);
+            shots.forEach((shot, idx) => {
+                if ((shot.club_category ?? '') === 'putt') return;
+                dirMap[`${hs.hole_number}-${idx}`] = {
+                    dev: deviation(bearing(shot.from, shot.to), holeBear),
+                    dist: metersToYards(distMeters(shot.from, shot.to)),
+                };
+            });
+        });
+        const byClub = {};
+        sg.shots.forEach(s => {
+            if (s.cat === 'putting') return;
+            if (!byClub[s.club]) byClub[s.club] = [];
+            const dir = dirMap[`${s.hole}-${s.shotIdx}`];
+            byClub[s.club].push({ ...s, dev: dir?.dev ?? 0, distYds: dir?.dist ?? s.distBefore });
+        });
+        const _std = arr => arr.length < 2 ? 0 : Math.sqrt(arr.reduce((a,v) => a+(v - arr.reduce((x,y)=>x+y,0)/arr.length)**2, 0)/(arr.length-1));
+        return Object.entries(byClub).filter(([,arr]) => arr.length >= 2).map(([name, arr]) => ({
+            name, shots: arr.length,
+            avgDist: arr.reduce((a,s)=>a+s.distYds,0)/arr.length,
+            distStd: _std(arr.map(s=>s.distYds)),
+            avgDev:  arr.reduce((a,s)=>a+s.dev,0)/arr.length,
+            avgSg:   arr.reduce((a,s)=>a+s.sg,0)/arr.length,
+        }));
+    })();
+
+    const _nlgCtx = buildAnalyticsContext(round, sg, _clubStats);
+    const insightsCard = buildInsightsCard(_nlgCtx);
+
     const catLabels = {
         off_tee: 'Off the Tee', approach: 'Approach',
         short_game: 'Short Game', putting: 'Putting'
@@ -1687,6 +1725,7 @@ function buildStrokesGainedTab(round) {
     const dispersion = buildDispersionHeatmaps(round, sg);
 
     return `
+    ${insightsCard}
     <div class="bg-white rounded-xl shadow-sm border p-6">
         <h3 class="text-lg font-semibold text-gray-700 mb-1">Strokes Gained</h3>
         <p class="text-xs text-gray-400 mb-4">Based on Mark Broadie's Every Shot Counts · single-digit handicap baseline</p>
@@ -2071,6 +2110,17 @@ function buildAiPrompt(round) {
                 L.push(parts.join(', '));
             });
         });
+    }
+
+    // NLG insights
+    const _sg = computeStrokesGained(round);
+    if (_sg) {
+        const _ctx = buildAnalyticsContext(round, _sg, null);
+        const insightsText = buildInsightsText(_ctx);
+        if (insightsText) {
+            L.push('\n## Pre-computed Insights');
+            L.push(insightsText);
+        }
     }
 
     // Strokes Gained summary
