@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { buildInsightsCard, buildInsightsText, generateInsights } from './nlg-engine.js';
 
 const PAGE_SIZE = 10;
 
@@ -1576,6 +1577,43 @@ function buildStrokesGainedTab(round) {
     if (!sg) return `<div class="bg-white rounded-xl shadow-sm border p-6">
         <p class="text-gray-400 text-sm">No scorecard data for Strokes Gained analysis.</p></div>`;
 
+    // Build club stats for NLG context (reuse buildClubAnalysis logic inline)
+    const _clubStats = (() => {
+        const sc = round.scorecard;
+        if (!sc?.hole_scores?.length) return [];
+        const dirMap = {};
+        sc.hole_scores.forEach(hs => {
+            const shots = hs.shots;
+            if (!shots.length) return;
+            const holeBear = bearing(shots[0].from, shots[shots.length - 1].to);
+            shots.forEach((shot, idx) => {
+                if ((shot.club_category ?? '') === 'putt') return;
+                dirMap[`${hs.hole_number}-${idx}`] = {
+                    dev: deviation(bearing(shot.from, shot.to), holeBear),
+                    dist: metersToYards(distMeters(shot.from, shot.to)),
+                };
+            });
+        });
+        const byClub = {};
+        sg.shots.forEach(s => {
+            if (s.cat === 'putting') return;
+            if (!byClub[s.club]) byClub[s.club] = [];
+            const dir = dirMap[`${s.hole}-${s.shotIdx}`];
+            byClub[s.club].push({ ...s, dev: dir?.dev ?? 0, distYds: dir?.dist ?? s.distBefore });
+        });
+        const _std = arr => arr.length < 2 ? 0 : Math.sqrt(arr.reduce((a,v) => a+(v - arr.reduce((x,y)=>x+y,0)/arr.length)**2, 0)/(arr.length-1));
+        return Object.entries(byClub).filter(([,arr]) => arr.length >= 2).map(([name, arr]) => ({
+            name, shots: arr.length,
+            avgDist: arr.reduce((a,s)=>a+s.distYds,0)/arr.length,
+            distStd: _std(arr.map(s=>s.distYds)),
+            avgDev:  arr.reduce((a,s)=>a+s.dev,0)/arr.length,
+            avgSg:   arr.reduce((a,s)=>a+s.sg,0)/arr.length,
+        }));
+    })();
+
+    const _nlgCtx = buildAnalyticsContext(round, sg, _clubStats);
+    const insightsCard = buildInsightsCard(_nlgCtx);
+
     const catLabels = {
         off_tee: 'Off the Tee', approach: 'Approach',
         short_game: 'Short Game', putting: 'Putting'
@@ -1687,6 +1725,7 @@ function buildStrokesGainedTab(round) {
     const dispersion = buildDispersionHeatmaps(round, sg);
 
     return `
+    ${insightsCard}
     <div class="bg-white rounded-xl shadow-sm border p-6">
         <h3 class="text-lg font-semibold text-gray-700 mb-1">Strokes Gained</h3>
         <p class="text-xs text-gray-400 mb-4">Based on Mark Broadie's Every Shot Counts · single-digit handicap baseline</p>
@@ -2011,6 +2050,115 @@ function buildDispersionHeatmaps(round, sg) {
     </div>`;
 }
 
+// ── NLG Analytics Context ───────────────────────────────────────────────────
+// Lives in app.js so it can access metersToYards, distMeters, bearing, deviation
+
+function buildAnalyticsContext(round, sg, clubStats) {
+    const sc = round.scorecard;
+    if (!sc) return null;
+    const parMap = Object.fromEntries(sc.hole_definitions.map(h => [h.hole_number, h]));
+
+    const holesPlayed = sc.hole_scores.length;
+    const onePutts    = sc.hole_scores.filter(h => h.putts === 1).length;
+    const threePutts  = sc.hole_scores.filter(h => h.putts >= 3).length;
+    const firHoles    = sc.hole_scores.filter(h => (parMap[h.hole_number]?.par ?? 0) >= 4);
+    const fir         = firHoles.length > 0
+        ? Math.round(firHoles.filter(h => h.fairway_hit).length / firHoles.length * 100) : 0;
+    const girCount    = sc.hole_scores.filter(h =>
+        h.shots.length <= (parMap[h.hole_number]?.par ?? 0) - 2).length;
+    const girPct      = Math.round(girCount / holesPlayed * 100);
+    const missedGir   = sc.hole_scores.filter(h =>
+        h.shots.length > (parMap[h.hole_number]?.par ?? 0) - 2);
+    const scramblingPct = missedGir.length > 0
+        ? Math.round(missedGir.filter(h => h.score <= (parMap[h.hole_number]?.par ?? 0)).length / missedGir.length * 100)
+        : 100;
+    const frontNineScore = sc.hole_scores.filter(h => h.hole_number <= 9).length >= 8
+        ? sc.hole_scores.filter(h => h.hole_number <= 9).reduce((a, h) => a + h.score, 0) : null;
+    const backNineScore  = sc.hole_scores.filter(h => h.hole_number > 9).length >= 8
+        ? sc.hole_scores.filter(h => h.hole_number > 9).reduce((a, h) => a + h.score, 0) : null;
+    const avgOverPar = holes => holes.length > 0
+        ? holes.reduce((a, h) => a + h.score - (parMap[h.hole_number]?.par ?? 0), 0) / holes.length : null;
+    const par3AvgOverPar = avgOverPar(sc.hole_scores.filter(h => (parMap[h.hole_number]?.par ?? 0) === 3));
+    const par5AvgOverPar = avgOverPar(sc.hole_scores.filter(h => (parMap[h.hole_number]?.par ?? 0) === 5));
+    let maxConsecutiveBogeys = 0, curStreak = 0;
+    sc.hole_scores.forEach(h => {
+        h.score > (parMap[h.hole_number]?.par ?? 0)
+            ? maxConsecutiveBogeys = Math.max(maxConsecutiveBogeys, ++curStreak)
+            : (curStreak = 0);
+    });
+
+    const health = round.health_timeline ?? [];
+    const bbSamples = health.filter(s => s.body_battery != null).map(s => s.body_battery);
+    const bbEnd   = bbSamples[bbSamples.length - 1] ?? null;
+    const bbDrain = bbSamples.length > 1 ? bbSamples[0] - bbEnd : null;
+    const stressSamples = health.filter(s => s.stress_proxy > 0).map(s => s.stress_proxy);
+    const avgStress = stressSamples.length
+        ? Math.round(stressSamples.reduce((a, b) => a + b, 0) / stressSamples.length) : null;
+    const hrSamples = health.filter(s => s.heart_rate != null);
+    const mid = Math.floor(hrSamples.length / 2);
+    const earlyRoundHr = mid > 0 ? hrSamples.slice(0, mid).reduce((a, s) => a + s.heart_rate, 0) / mid : null;
+    const lateRoundHr  = mid > 0 ? hrSamples.slice(mid).reduce((a, s) => a + s.heart_rate, 0) / (hrSamples.length - mid) : null;
+
+    const worstClub = clubStats?.length ? [...clubStats].sort((a, b) => a.avgSg - b.avgSg)[0] : null;
+    const bestClub  = clubStats?.length ? [...clubStats].sort((a, b) => b.avgSg - a.avgSg)[0] : null;
+    const driverClub = clubStats?.find(c => /driver/i.test(c.name)) ?? null;
+    const wedgeClub  = clubStats?.filter(c => /pw|gw|sw|lw|wedge/i.test(c.name))
+        .sort((a, b) => b.shots - a.shots)[0] ?? null;
+    const ironClubs  = clubStats?.filter(c => /\d-iron|iron/i.test(c.name)) ?? [];
+    const ironBias   = ironClubs.length
+        ? ironClubs.reduce((a, c) => a + c.avgDev * c.shots, 0) / ironClubs.reduce((a, c) => a + c.shots, 0)
+        : null;
+
+    // Dispersion: find most-shot distance bucket
+    let approachDispersion = null;
+    const dispBuckets = [
+        { label: '101–150 yds', min: 101, max: 150 }, { label: '151–200 yds', min: 151, max: 200 },
+        { label: '51–100 yds', min: 51, max: 100 },   { label: '0–50 yds', min: 0, max: 50 },
+        { label: '200+ yds', min: 201, max: 999 },
+    ];
+    for (const bucket of dispBuckets) {
+        const deltas = [];
+        sc.hole_scores.forEach(hs => {
+            const shots = hs.shots;
+            if (!shots.length) return;
+            const green = shots[shots.length - 1].to;
+            shots.forEach(shot => {
+                if ((shot.club_category ?? '') === 'putt') return;
+                const d = metersToYards(distMeters(shot.from, green));
+                if (d >= bucket.min && d <= bucket.max) {
+                    const actual = metersToYards(distMeters(shot.from, shot.to));
+                    deltas.push(d > 0 ? (actual - d) / d * 100 : 0);
+                }
+            });
+        });
+        if (deltas.length >= 3) {
+            approachDispersion = {
+                label: bucket.label,
+                shortPct: Math.round(deltas.filter(p => p < -5).length / deltas.length * 100),
+                longPct:  Math.round(deltas.filter(p => p > 5).length  / deltas.length * 100),
+            };
+            break;
+        }
+    }
+
+    const allDevs = clubStats?.flatMap(c => Array(c.shots).fill(Math.abs(c.avgDev))) ?? [];
+    const overallDispersionAngle = allDevs.length
+        ? allDevs.reduce((a, b) => a + b, 0) / allDevs.length : null;
+
+    return {
+        round, sc, sg, clubStats,
+        holesPlayed, onePutts, threePutts, fir, girPct, scramblingPct,
+        frontNineScore, backNineScore, par3AvgOverPar, par5AvgOverPar, maxConsecutiveBogeys,
+        bbEnd, bbDrain, avgStress, earlyRoundHr, lateRoundHr,
+        durationMin: Math.round(round.duration_seconds / 60),
+        distanceKm: +(round.distance_meters / 1000).toFixed(2),
+        altRange: round.max_altitude_meters != null ? round.max_altitude_meters - round.min_altitude_meters : null,
+        avgTempo: round.avg_swing_tempo ?? null,
+        worstClub, bestClub, driverClub, wedgeClub, ironBias,
+        approachDispersion, overallDispersionAngle,
+    };
+}
+
 // ── AI Prompt Builder ────────────────────────────────────────────────────────
 
 function buildAiPrompt(round) {
@@ -2071,6 +2219,17 @@ function buildAiPrompt(round) {
                 L.push(parts.join(', '));
             });
         });
+    }
+
+    // NLG insights
+    const _sg = computeStrokesGained(round);
+    if (_sg) {
+        const _ctx = buildAnalyticsContext(round, _sg, null);
+        const insightsText = buildInsightsText(_ctx);
+        if (insightsText) {
+            L.push('\n## Pre-computed Insights');
+            L.push(insightsText);
+        }
     }
 
     // Strokes Gained summary
